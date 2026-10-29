@@ -60,6 +60,7 @@
 - [x] Audio output on supported physical and virtual hardware (VMware HD Audio; the desktop's Realtek codec awaits physical validation).
 - [x] Document and code editing (Markdown with a live preview; code with highlighting, find/replace, undo, and tabs).
 - [x] Audio/video playback (WAV, FLAC, MP3/MP2, and MPEG-1 video decoded in Zig, in a Player with a queue).
+- [x] Internet radio (Shoutcast/Icecast MP3 streams with live titles, Radio Browser search, and favourites).
 
 ## Milestone 7: Initial Release
 

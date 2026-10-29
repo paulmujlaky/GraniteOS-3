@@ -8,6 +8,7 @@ comptime {
     _ = @import("wav.zig");
     _ = @import("flac.zig");
     _ = @import("mp3.zig");
+    _ = @import("icy.zig");
     _ = @import("video.zig");
     _ = @import("system.zig");
     _ = @import("movie.zig");

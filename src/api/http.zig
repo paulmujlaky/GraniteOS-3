@@ -69,6 +69,64 @@ pub const Request = struct {
 /// Trusted roots, read from the net service on first use and kept for the life of the app.
 var bundle: ?Bundle = null;
 
+/// A response whose body is read as it arrives, for one too long to hold or one that never ends, such as a radio station's.
+/// It stays where `open` put it until `close`, as its streams point into it.
+pub const Response = struct {
+
+    status: u16,
+
+    /// The status line and headers, ending in a blank line; a Shoutcast `ICY` status line reads as HTTP/1.0.
+    head: []const u8,
+
+    /// The body, out of its chunks when it came in them.
+    body: *std.Io.Reader,
+
+    /// Where the final response sends on to, for a redirect.
+    location: ?[]const u8,
+
+    allocator: std.mem.Allocator,
+    buffers: []u8,
+    socket: net.Socket,
+    stream: net.Stream,
+    session: Tls,
+    reader: std.http.Reader,
+    transfer: [64]u8,
+
+    /// The value of header `name`, whatever its case.
+    pub fn header(self: *const Response, name: []const u8) ?[]const u8 {
+
+        var lines = std.mem.splitSequence(u8, self.head, "\r\n");
+
+        _ = lines.next();
+
+        while (lines.next()) |line| {
+
+            const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+
+            if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, line[0..colon], " \t"), name)) return std.mem.trim(u8, line[colon + 1 ..], " \t");
+
+        }
+
+        return null;
+
+    }
+
+    /// Why the last read of `body` failed.
+    pub fn failure(self: *const Response) HttpError {
+
+        return self.stream.failure orelse error.Broken;
+
+    }
+
+    pub fn close(self: *Response) void {
+
+        self.socket.close();
+        self.allocator.free(self.buffers);
+
+    }
+
+};
+
 /// Fetches `url` as `send` does with a plain GET.
 pub fn get(allocator: std.mem.Allocator, url: []const u8, sink: *std.Io.Writer) HttpError!u16 {
 
@@ -80,7 +138,25 @@ pub fn get(allocator: std.mem.Allocator, url: []const u8, sink: *std.Io.Writer) 
 /// its status line and headers to `head`; returns its status. `allocator` must outlive the app, which keeps the trusted roots.
 pub fn send(allocator: std.mem.Allocator, url: []const u8, request: Request, sink: *std.Io.Writer, head: ?*std.Io.Writer) HttpError!u16 {
 
+    var response: Response = undefined;
+
+    try open(allocator, url, request, &response);
+    defer response.close();
+
+    if (head) |out| out.writeAll(std.mem.trimRight(u8, response.head, "\r\n")) catch return error.Broken;
+    if (request.method == .HEAD) return response.status;
+
+    _ = response.body.streamRemaining(sink) catch return response.failure();
+
+    return response.status;
+
+}
+
+/// Sends `request` to `url` as `send` does, but leaves the final response in `out` with its body unread; close it after.
+pub fn open(allocator: std.mem.Allocator, url: []const u8, request: Request, out: *Response) HttpError!void {
+
     var location: [2048]u8 = undefined;
+    var moved: [2048]u8 = undefined;
     var current = url;
     var asked = request;
 
@@ -93,29 +169,54 @@ pub fn send(allocator: std.mem.Allocator, url: []const u8, request: Request, sin
         current = location[0..current.len];
 
         const parsed = Url.parse(current) orelse return error.Malformed;
-        const next = try fetch(allocator, parsed, asked, sink, head, &location);
 
-        switch (next) {
+        try connect(allocator, parsed, asked, out);
 
-            .status => |code| return code,
-            .moved => |moved| {
+        const code = out.status;
 
-                current = location[0..moved.length];
+        if (code < 300 or code >= 400 or code == 304) return;
 
-                // As browsers do, a 303, or a 301 or 302 after a POST, asks again with GET and no body.
-                if (moved.code == 303 or (moved.code <= 302 and asked.method == .POST)) asked = .{
+        const target = out.location orelse return;
+        const length = resolve(parsed, target, &moved) catch |err| {
 
-                    .headers = asked.headers,
+            out.close();
+            return err;
 
-                };
+        };
 
-            },
+        out.close();
+        current = moved[0..length];
 
-        }
+        // As browsers do, a 303, or a 301 or 302 after a POST, asks again with GET and no body.
+        if (code == 303 or (code <= 302 and asked.method == .POST)) asked = .{
+
+            .headers = asked.headers,
+
+        };
 
     }
 
     return error.Redirects;
+
+}
+
+/// Writes `text` for a URL's query: letters, digits, and `-._~` as they are, and everything else, spaces and accents too,
+/// percent-encoded.
+pub fn escape(writer: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!void {
+
+    for (text) |byte| {
+
+        if (std.ascii.isAlphanumeric(byte) or std.mem.indexOfScalar(u8, "-._~", byte) != null) {
+
+            try writer.writeByte(byte);
+
+        } else {
+
+            try writer.print("%{X:0>2}", .{byte});
+
+        }
+
+    }
 
 }
 
@@ -142,102 +243,86 @@ pub fn reason(err: HttpError) []const u8 {
 
 }
 
-const Outcome = union(enum) {
-
-    status: u16,
-
-    /// Redirected with `code`, to the address now in the first `length` bytes of the location buffer.
-    moved: struct {
-
-        code: u16,
-        length: usize,
-
-    },
-
-};
-
-fn fetch(allocator: std.mem.Allocator, url: Url, request: Request, sink: *std.Io.Writer, head: ?*std.Io.Writer, location: *[2048]u8) HttpError!Outcome {
+/// Connects to `url`, sends `request`, and reads the response's head into `out`, leaving its body to read.
+fn connect(allocator: std.mem.Allocator, url: Url, request: Request, out: *Response) HttpError!void {
 
     const address = try net.resolve(url.host);
-    const socket = try net.Socket.connect(.tcp, address, url.port);
 
-    defer socket.close();
+    out.socket = try net.Socket.connect(.tcp, address, url.port);
+    errdefer out.socket.close();
 
-    // TLS reads whole records, so both directions buffer at least one.
-    const buffers = allocator.alloc(u8, 4 * Tls.min_buffer_len) catch return error.Exhausted;
+    // TLS reads whole records, so both directions buffer at least one; the head is kept after them, apart from the body.
+    out.allocator = allocator;
+    out.buffers = allocator.alloc(u8, 4 * Tls.min_buffer_len + head_most) catch return error.Exhausted;
+    errdefer allocator.free(out.buffers);
 
-    defer allocator.free(buffers);
+    out.stream = out.socket.stream(out.buffers[0..Tls.min_buffer_len], out.buffers[Tls.min_buffer_len..][0..Tls.min_buffer_len]);
 
-    var stream = socket.stream(buffers[0..Tls.min_buffer_len], buffers[Tls.min_buffer_len..][0..Tls.min_buffer_len]);
-    var input = &stream.reader;
-    var output = &stream.writer;
-    var session: Tls = undefined;
+    var input = &out.stream.reader;
+    var output = &out.stream.writer;
 
     if (url.secure) {
 
-        session = Tls.init(input, output, .{
+        out.session = Tls.init(input, output, .{
 
             .host = .{ .explicit = url.host },
             .ca = .{ .bundle = try trust(allocator) },
-            .read_buffer = buffers[2 * Tls.min_buffer_len ..][0..Tls.min_buffer_len],
-            .write_buffer = buffers[3 * Tls.min_buffer_len ..],
+            .read_buffer = out.buffers[2 * Tls.min_buffer_len ..][0..Tls.min_buffer_len],
+            .write_buffer = out.buffers[3 * Tls.min_buffer_len ..][0..Tls.min_buffer_len],
             .now = @intCast(net.utc()),
             .random = api.random,
 
         }) catch |err| return switch (err) {
 
             error.TlsCertificateNotVerified, error.CertificateHostMismatch, error.CertificateIssuerMismatch, error.CertificateExpired, error.CertificateNotYetValid, error.CertificateSignatureInvalid => error.Untrusted,
-            else => if (stream.failure) |failure| failure else error.Broken,
+            else => out.failure(),
 
         };
 
-        input = &session.reader;
-        output = &session.writer;
+        input = &out.session.reader;
+        output = &out.session.writer;
 
     }
 
-    ask(output, url, request) catch return stream.failure orelse error.Broken;
-    if (url.secure) stream.writer.flush() catch return stream.failure orelse error.Broken;
+    ask(output, url, request) catch return out.failure();
+    if (url.secure) out.stream.writer.flush() catch return out.failure();
 
-    var reader = std.http.Reader{
+    out.reader = .{
 
         .in = input,
         .interface = undefined,
         .state = .ready,
-        .max_head_len = 16 * 1024,
+        .max_head_len = head_most,
 
     };
 
-    const bytes = reader.receiveHead() catch return stream.failure orelse error.Malformed;
-    const parsed = std.http.Client.Response.Head.parse(bytes) catch return error.Malformed;
-    const code = @intFromEnum(parsed.status);
+    const received = out.reader.receiveHead() catch return out.stream.failure orelse error.Malformed;
+    const head = normal(out.buffers[4 * Tls.min_buffer_len ..], received) orelse return error.Malformed;
+    const parsed = std.http.Client.Response.Head.parse(head) catch return error.Malformed;
 
-    if (code >= 300 and code < 400 and code != 304) {
+    out.status = @intFromEnum(parsed.status);
+    out.head = head;
+    out.location = parsed.location;
+    out.body = out.reader.bodyReader(&out.transfer, parsed.transfer_encoding, parsed.content_length);
 
-        const moved = parsed.location orelse return .{ .status = code };
+}
 
-        return .{
+/// The most a response's head may hold.
+const head_most = 16 * 1024;
 
-            .moved = .{
+/// Copies `head` into `out`, where reading the body cannot move it, with a Shoutcast `ICY` status line read as HTTP/1.0.
+fn normal(out: []u8, head: []const u8) ?[]const u8 {
 
-                .code = code,
-                .length = try resolve(url, moved, location),
+    const icy = std.mem.startsWith(u8, head, "ICY ");
+    const prefix = if (icy) "HTTP/1.0 " else "";
+    const rest = if (icy) head[4..] else head;
 
-            },
+    if (prefix.len + rest.len > out.len) return null;
 
-        };
+    @memcpy(out[0..prefix.len], prefix);
+    @memcpy(out[prefix.len..][0..rest.len], rest);
 
-    }
-
-    if (head) |out| out.writeAll(std.mem.trimRight(u8, bytes, "\r\n")) catch return error.Broken;
-    if (request.method == .HEAD) return .{ .status = code };
-
-    var transfer: [64]u8 = undefined;
-    const body = reader.bodyReader(&transfer, parsed.transfer_encoding, parsed.content_length);
-
-    _ = body.streamRemaining(sink) catch return stream.failure orelse error.Broken;
-
-    return .{ .status = code };
+    return out[0 .. prefix.len + rest.len];
 
 }
 

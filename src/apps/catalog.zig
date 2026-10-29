@@ -78,6 +78,7 @@ pub const apps = [_]App{
     .{ .image = .screenshots, .category = .creative, .title = "Screenshots", .icon = .cut, .summary = "Snip the screen and keep your screenshots" },
     .{ .image = .weather, .category = .internet, .title = "Weather", .icon = .cloud_sun, .summary = "Conditions and forecasts where you are" },
     .{ .image = .requests, .category = .internet, .title = "Requests", .icon = .send, .summary = "Send HTTP requests and read the replies" },
+    .{ .image = .radio, .category = .internet, .title = "Radio", .icon = .radio, .summary = "Listen to radio stations from around the world" },
     .{ .image = .monitor, .category = .system, .title = "Monitor", .icon = .activity, .summary = "Watch processes, memory, and processors" },
     .{ .image = .settings, .category = .system, .title = "Settings", .icon = .settings, .summary = "Display, appearance, and accounts" },
 

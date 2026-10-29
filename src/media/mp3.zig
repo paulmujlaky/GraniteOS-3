@@ -541,6 +541,148 @@ pub const Frames = struct {
 
 };
 
+/// MPEG audio arriving a piece at a time, as a film's packets or a radio station send it, held until whole frames are in.
+pub const Feed = struct {
+
+    /// The format of the first frame header the one after it confirms; zero until `probe` finds one.
+    rate: u32 = 0,
+    channels: u8 = 0,
+
+    /// Bytes not yet framed, between `head` and `tail`.
+    bytes: []u8,
+    head: usize = 0,
+    tail: usize = 0,
+
+    pub fn init(bytes: []u8) Feed {
+
+        return .{
+
+            .bytes = bytes,
+
+        };
+
+    }
+
+    /// Bytes `keep` takes without dropping any held.
+    pub fn room(self: *const Feed) usize {
+
+        return self.bytes.len - (self.tail - self.head);
+
+    }
+
+    /// Drops every byte held, keeping the format.
+    pub fn clear(self: *Feed) void {
+
+        self.head = 0;
+        self.tail = 0;
+
+    }
+
+    /// Adds `data`; when it will not fit, what is held goes first, so a source running far ahead loses sound rather than stalls.
+    pub fn keep(self: *Feed, data: []const u8) void {
+
+        if (self.tail + data.len > self.bytes.len) {
+
+            std.mem.copyForwards(u8, self.bytes[0 .. self.tail - self.head], self.bytes[self.head..self.tail]);
+            self.tail -= self.head;
+            self.head = 0;
+
+        }
+
+        if (self.tail + data.len > self.bytes.len) self.clear();
+
+        const count = @min(data.len, self.bytes.len);
+
+        @memcpy(self.bytes[self.tail..][0..count], data[0..count]);
+        self.tail += count;
+
+    }
+
+    /// Learns the format from the first frame header the bytes held confirm with the one after it, stepping to that frame.
+    pub fn probe(self: *Feed) void {
+
+        const held = self.bytes[self.head..self.tail];
+        var index: usize = 0;
+
+        while (index + 4 <= held.len) : (index += 1) {
+
+            const header = Header.parse(std.mem.readInt(u32, held[index..][0..4], .big)) orelse continue;
+            const next = index + header.size();
+
+            if (next + 4 > held.len) return;
+
+            const following = Header.parse(std.mem.readInt(u32, held[next..][0..4], .big)) orelse continue;
+
+            if (following.rate != header.rate) continue;
+
+            self.rate = header.rate;
+            self.channels = header.channels;
+            self.head += index;
+
+            return;
+
+        }
+
+    }
+
+    /// The next whole frame held, stepping over what does not start one at the format's rate; null until more arrive.
+    pub fn frame(self: *Feed) ?[]const u8 {
+
+        while (self.tail - self.head >= 4) {
+
+            const held = self.bytes[self.head..self.tail];
+            const header = Header.parse(std.mem.readInt(u32, held[0..4], .big)) orelse {
+
+                self.head += 1;
+                continue;
+
+            };
+
+            const length = header.size();
+
+            if (length < 4 or header.rate != self.rate and self.rate != 0) {
+
+                self.head += 1;
+                continue;
+
+            }
+
+            if (held.len < length) return null;
+
+            self.head += length;
+
+            return held[0..length];
+
+        }
+
+        return null;
+
+    }
+
+};
+
+/// Copies `frames` frames of interleaved `samples` in `from` channels to `out` in `to`, averaging two into one or doubling one.
+pub fn remix(samples: []const f32, from: u8, out: []f32, to: u8, frames: usize) void {
+
+    if (from == to) return @memcpy(out[0 .. frames * to], samples[0 .. frames * from]);
+
+    for (0..frames) |index| {
+
+        if (from == 1) {
+
+            out[index * 2] = samples[index];
+            out[index * 2 + 1] = samples[index];
+
+        } else {
+
+            out[index] = (samples[index * 2] + samples[index * 2 + 1]) / 2;
+
+        }
+
+    }
+
+}
+
 /// The polyphase filterbank turning one sample of each of 32 subbands into 32 output samples.
 const Synthesis = struct {
 
@@ -2817,6 +2959,69 @@ test "Layer II and III frames decode one by one as a system stream would feed th
         try std.testing.expect(difference(samples[0 .. count * channels], entry.reference) <= 2);
 
     }
+
+}
+
+test "a feed frames sound arriving in pieces of any size, past what comes before the first frame" {
+
+    for ([_]usize{ 10, 3, 4 }) |which| {
+
+        for ([_]usize{ 1, 97, 4096 }) |piece| {
+
+            const entry = fixtures[which];
+            const channels: usize = if (std.mem.indexOf(u8, entry.name, "mono") != null) 1 else 2;
+            const wanted = entry.reference.len / 2 / channels;
+            var buffer: [8192]u8 = undefined;
+            var feed = Feed.init(&buffer);
+            var frames = Frames.init();
+            var samples: [4096 * 2]f32 = undefined;
+            var count: usize = 0;
+            var offset: usize = 0;
+
+            feed.keep("ICY 200 OK\r\n\r\n");
+
+            while (count < wanted and offset < entry.audio.len) {
+
+                const part = entry.audio[offset..@min(offset + piece, entry.audio.len)];
+
+                feed.keep(part);
+                offset += part.len;
+
+                if (feed.rate == 0) feed.probe();
+                if (feed.rate == 0) continue;
+
+                while (feed.frame()) |bytes| {
+
+                    var out: [2304]f32 = undefined;
+                    const decoded = try frames.decode(bytes, &out);
+                    const kept = @min(decoded, wanted - count);
+
+                    @memcpy(samples[count * channels ..][0 .. kept * channels], out[0 .. kept * channels]);
+                    count += kept;
+
+                }
+
+            }
+
+            try std.testing.expectEqual(wanted, count);
+            try std.testing.expectEqual(channels, feed.channels);
+            try std.testing.expect(difference(samples[0 .. count * channels], entry.reference) <= 2);
+
+        }
+
+    }
+
+}
+
+test "remixing folds stereo to mono and doubles mono to stereo" {
+
+    var out: [4]f32 = undefined;
+
+    remix(&.{ 0.5, -0.5 }, 1, &out, 2, 2);
+    try std.testing.expectEqualSlices(f32, &.{ 0.5, 0.5, -0.5, -0.5 }, &out);
+
+    remix(&.{ 1, 0, 0.5, 0.25 }, 2, &out, 1, 2);
+    try std.testing.expectEqualSlices(f32, &.{ 0.5, 0.375 }, out[0..2]);
 
 }
 

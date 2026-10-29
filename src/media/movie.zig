@@ -39,10 +39,8 @@ pub const Movie = struct {
     pictures: video.Decoder,
     sound: *mp3.Frames,
 
-    /// Sound bytes from the stream not yet decoded, between `head` and `tail`, and the time of the frame at `head`.
-    audio: []u8,
-    head: usize = 0,
-    tail: usize = 0,
+    /// Sound bytes from the stream not yet decoded, and the time of the first frame among them.
+    feed: mp3.Feed,
     heard: ?f64 = null,
 
     /// Samples of the last frame decoded, and how many of its frames were read.
@@ -79,7 +77,7 @@ pub const Movie = struct {
             .demuxer = demuxer,
             .pictures = video.Decoder.init(allocator),
             .sound = sound,
-            .audio = audio,
+            .feed = .init(audio),
 
         };
 
@@ -88,7 +86,7 @@ pub const Movie = struct {
         // Reads ahead until the sound's format and the pictures' size are known.
         while (movie.demuxer.audio and movie.rate == 0 or movie.demuxer.video and movie.pictures.sequence() == null) {
 
-            if (movie.tail == backlog or !try movie.pull()) break;
+            if (movie.feed.tail == backlog or !try movie.pull()) break;
             if (movie.rate == 0) movie.probe();
 
             // The decoder reads the sequence header only as it decodes.
@@ -108,7 +106,7 @@ pub const Movie = struct {
 
         self.pictures.deinit(allocator);
         allocator.destroy(self.sound);
-        allocator.free(self.audio);
+        allocator.free(self.feed.bytes);
 
     }
 
@@ -206,8 +204,7 @@ pub const Movie = struct {
 
         self.pictures.reset();
         self.sound.reset();
-        self.head = 0;
-        self.tail = 0;
+        self.feed.clear();
         self.heard = null;
         self.held = 0;
         self.used = 0;
@@ -242,7 +239,7 @@ pub const Movie = struct {
 
         while (true) {
 
-            if (self.frame()) |bytes| {
+            if (self.feed.frame()) |bytes| {
 
                 const header = mp3.Header.parse(std.mem.readInt(u32, bytes[0..4], .big)).?;
                 var samples: [longest]f32 = undefined;
@@ -259,7 +256,7 @@ pub const Movie = struct {
 
                 self.held = frames;
                 self.used = 0;
-                self.fit(samples[0 .. frames * header.channels], header.channels);
+                mp3.remix(&samples, header.channels, &self.decoded, self.channels, frames);
 
                 return true;
 
@@ -268,62 +265,6 @@ pub const Movie = struct {
             if (!try self.pull()) return false;
 
         }
-
-    }
-
-    /// Copies a frame's samples in as the film's channels have them, folding or doubling one that changed.
-    fn fit(self: *Movie, samples: []const f32, channels: u8) void {
-
-        if (channels == self.channels) return @memcpy(self.decoded[0..samples.len], samples);
-
-        for (0..self.held) |index| {
-
-            if (channels == 1) {
-
-                self.decoded[index * 2] = samples[index];
-                self.decoded[index * 2 + 1] = samples[index];
-
-            } else {
-
-                self.decoded[index] = (samples[index * 2] + samples[index * 2 + 1]) / 2;
-
-            }
-
-        }
-
-    }
-
-    /// The next whole frame among the sound bytes held, stepping over what does not start one; null until more arrive.
-    fn frame(self: *Movie) ?[]const u8 {
-
-        while (self.tail - self.head >= 4) {
-
-            const held = self.audio[self.head..self.tail];
-            const header = mp3.Header.parse(std.mem.readInt(u32, held[0..4], .big)) orelse {
-
-                self.head += 1;
-                continue;
-
-            };
-
-            const length = header.size();
-
-            if (length < 4 or header.rate != self.rate and self.rate != 0) {
-
-                self.head += 1;
-                continue;
-
-            }
-
-            if (held.len < length) return null;
-
-            self.head += length;
-
-            return held[0..length];
-
-        }
-
-        return null;
 
     }
 
@@ -356,58 +297,21 @@ pub const Movie = struct {
             const stamp = time orelse return;
 
             self.heard = stamp;
-            self.head = 0;
-            self.tail = 0;
-
-        }
-
-        if (self.tail + bytes.len > self.audio.len) {
-
-            std.mem.copyForwards(u8, self.audio[0 .. self.tail - self.head], self.audio[self.head..self.tail]);
-            self.tail -= self.head;
-            self.head = 0;
+            self.feed.clear();
 
         }
 
         // Pictures read far ahead of the sound; what will not fit is lost rather than held without end.
-        if (self.tail + bytes.len > self.audio.len) {
-
-            self.head = 0;
-            self.tail = 0;
-
-        }
-
-        const count = @min(bytes.len, self.audio.len);
-
-        @memcpy(self.audio[self.tail..][0..count], bytes[0..count]);
-        self.tail += count;
+        self.feed.keep(bytes);
 
     }
 
-    /// Learns the sound's format from the first frame header the bytes held confirm with the one after it.
+    /// Learns the sound's format from the bytes held.
     fn probe(self: *Movie) void {
 
-        const held = self.audio[self.head..self.tail];
-        var index: usize = 0;
-
-        while (index + 4 <= held.len) : (index += 1) {
-
-            const header = mp3.Header.parse(std.mem.readInt(u32, held[index..][0..4], .big)) orelse continue;
-            const next = index + header.size();
-
-            if (next + 4 > held.len) return;
-
-            const following = mp3.Header.parse(std.mem.readInt(u32, held[next..][0..4], .big)) orelse continue;
-
-            if (following.rate != header.rate) continue;
-
-            self.rate = header.rate;
-            self.channels = header.channels;
-            self.head += index;
-
-            return;
-
-        }
+        self.feed.probe();
+        self.rate = self.feed.rate;
+        self.channels = self.feed.channels;
 
     }
 

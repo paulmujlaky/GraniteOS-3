@@ -166,6 +166,9 @@ pub fn build(b: *std.Build) void {
                 .target = application.root_module.resolved_target,
                 .optimize = optimize,
 
+                // The boot volume holds every program, so they leave out debug info, which nothing in the guest reads.
+                .strip = true,
+
                 .red_zone = false,
                 .stack_check = false,
                 .stack_protector = false,

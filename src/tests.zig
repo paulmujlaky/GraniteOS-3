@@ -12,6 +12,7 @@ comptime {
     _ = @import("services/tests.zig");
     _ = @import("gui/tests.zig");
     _ = @import("media/tests.zig");
+    _ = @import("apps/stations.zig");
 
 }
 

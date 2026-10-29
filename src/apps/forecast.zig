@@ -322,15 +322,7 @@ pub fn search(query: []const u8, out: []Found) HttpError!usize {
     var writer = std.Io.Writer.fixed(&url);
 
     writer.writeAll("https://geocoding-api.open-meteo.com/v1/search?count=8&language=en&format=json&name=") catch return error.Malformed;
-
-    // Letters, digits, and `-._~` pass as they are; everything else, spaces and accents too, is percent-encoded.
-    for (query) |byte| {
-
-        const plain = std.ascii.isAlphanumeric(byte) or std.mem.indexOfScalar(u8, "-._~", byte) != null;
-
-        (if (plain) writer.writeByte(byte) else writer.print("%{X:0>2}", .{byte})) catch return error.Malformed;
-
-    }
+    api.http.escape(&writer, query) catch return error.Malformed;
 
     const reply = std.json.parseFromSliceLeaky(struct {
 

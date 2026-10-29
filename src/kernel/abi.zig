@@ -94,6 +94,7 @@ pub const Image = enum(u64) {
     requests,
     audio,
     player,
+    radio,
 
     /// Runs with application permissions rather than as a service.
     pub fn application(self: Image) bool {
@@ -113,7 +114,7 @@ pub const Image = enum(u64) {
 
         return switch (self) {
 
-            .shell, .login, .settings, .monitor, .weather, .requests => true,
+            .shell, .login, .settings, .monitor, .weather, .requests, .radio => true,
             else => false,
 
         };

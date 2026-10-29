@@ -10,6 +10,7 @@ pub const Tags = @import("tags.zig").Tags;
 pub const wav = @import("wav.zig");
 pub const flac = @import("flac.zig");
 pub const mp3 = @import("mp3.zig");
+pub const icy = @import("icy.zig");
 pub const video = @import("video.zig");
 pub const system = @import("system.zig");
 pub const Movie = @import("movie.zig").Movie;
