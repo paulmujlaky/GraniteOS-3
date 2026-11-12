@@ -31,14 +31,12 @@ pub export fn app_main(_: usize, _: usize, environment: *const api.abi.Environme
             .hello => protocol.version,
             .write => if (write(value)) 0 else protocol.invalid,
             .read => if (input(5) & 1 != 0) input(0) else protocol.empty,
-            .crash => if (request.first == api.raw(.owner, 0, 0, 0).first) fault() else protocol.invalid,
+            .crash => api.crash(request),
             else => protocol.invalid,
 
         };
 
-        api.reply(request, result) catch {
-
-        };
+        api.answer(request, result);
 
     }
 
@@ -76,12 +74,5 @@ fn write(chunk: u56) bool {
     while (rest != 0) : (rest >>= 8) output(0, @truncate(rest));
 
     return true;
-
-}
-
-fn fault() noreturn {
-
-    asm volatile ("ud2");
-    api.exit(1);
 
 }

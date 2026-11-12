@@ -56,6 +56,15 @@ pub const Rect = struct {
 
     }
 
+    /// The part inside `limit`, or all of it without one; empty, which draws nothing, when they do not meet.
+    pub fn within(self: Rect, limit: ?Rect) Rect {
+
+        const outer = limit orelse return self;
+
+        return outer.intersect(self) orelse .{};
+
+    }
+
     pub fn intersect(self: Rect, other: Rect) ?Rect {
 
         const left = @max(self.x, other.x);

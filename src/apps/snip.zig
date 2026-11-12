@@ -339,9 +339,7 @@ fn finish(area: ?gui.Rect) void {
 
         const length = if (path) |saved| if (api.store(request, 0, saved)) |_| saved.len else |_| 0 else 0;
 
-        api.reply(request, length) catch {
-
-        };
+        api.answer(request, length);
 
     } else if (path) |saved| {
 

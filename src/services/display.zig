@@ -584,9 +584,7 @@ pub export fn app_main(_: usize, base: usize, environment: *const api.abi.Enviro
 
         while (true) : (answered += 1) {
 
-            if (respond(request)) |result| api.reply(request, result) catch {
-
-            };
+            if (respond(request)) |result| api.answer(request, result);
 
             if (answered == 31) break;
             request = api.receive(false) catch break;
@@ -610,9 +608,7 @@ fn greet() void {
         const request = api.receive(true) catch continue;
         const hello = protocol.operation(request.second) == .hello;
 
-        api.reply(request, if (hello) protocol.version else protocol.invalid) catch {
-
-        };
+        api.answer(request, if (hello) protocol.version else protocol.invalid);
 
         if (hello) return;
 
@@ -869,7 +865,7 @@ fn respond(request: api.Request) ?u64 {
         .quartz => quartz(request, value),
         .accent => accent(request, value),
         .scale => rescale(value),
-        .crash => if (request.first == api.raw(.owner, 0, 0, 0).first) fault() else protocol.invalid,
+        .crash => api.crash(request),
         else => protocol.invalid,
 
     };
@@ -3397,12 +3393,5 @@ fn sprite(at: gui.Point) gui.Rect {
         .height = @intCast(worn.height),
 
     };
-
-}
-
-fn fault() noreturn {
-
-    asm volatile ("ud2");
-    api.exit(1);
 
 }

@@ -1525,7 +1525,7 @@ pub const Preview = struct {
 
             const place = Rect{ .x = shown.area.x + area.x, .y = shown.area.y + y, .width = shown.area.width, .height = shown.area.height };
 
-            list.limit = if (shown.clip) |clip| clipped(limit, .{ .x = clip.x + area.x, .y = clip.y + y, .width = clip.width, .height = clip.height }) else limit;
+            list.limit = if (shown.clip) |clip| (Rect{ .x = clip.x + area.x, .y = clip.y + y, .width = clip.width, .height = clip.height }).within(limit) else limit;
 
             switch (shown.kind) {
 
@@ -1619,14 +1619,6 @@ fn columnsOf(string: []const u8) usize {
     }
 
     return count;
-
-}
-
-fn clipped(limit: ?Rect, area: Rect) Rect {
-
-    const outer = limit orelse return area;
-
-    return outer.intersect(area) orelse .{};
 
 }
 

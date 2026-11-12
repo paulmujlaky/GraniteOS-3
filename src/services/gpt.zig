@@ -3,6 +3,7 @@ const std = @import("std");
 const volume = @import("volume.zig");
 
 const Crc32 = std.hash.Crc32;
+const field = volume.field;
 
 /// EFI system partition type c12a7328-f81f-11d2-ba4b-00a0c93ec93b, in on-disk byte order.
 pub const esp = [16]u8{
@@ -192,11 +193,5 @@ fn seal(header: *[512]u8) void {
 
     std.mem.writeInt(u32, header[16..20], 0, .little);
     std.mem.writeInt(u32, header[16..20], Crc32.hash(header[0..size]), .little);
-
-}
-
-fn field(comptime T: type, bytes: []const u8, offset: usize) T {
-
-    return std.mem.readInt(T, bytes[offset..][0..@sizeOf(T)], .little);
 
 }

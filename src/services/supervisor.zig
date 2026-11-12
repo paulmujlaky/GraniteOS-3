@@ -67,9 +67,7 @@ pub export fn app_main(restored: usize, _: usize, environment: *const api.abi.En
 
         const result = handle(request);
 
-        api.reply(request, result) catch {
-
-        };
+        api.answer(request, result);
 
     }
 

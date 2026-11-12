@@ -14,7 +14,8 @@ var mounted: volume.Volume(disk.Disk) = undefined;
 var ready = false;
 
 var path: [path_limit + 1]u8 = undefined;
-var chunk: [volume.block_size]u8 = undefined;
+// As much as one fetch or store moves, so large files cross in few steps.
+var chunk: [0x10000]u8 = undefined;
 var sector: [512]u8 = undefined;
 
 pub export fn app_main(_: usize, _: usize, environment: *const api.abi.Environment) callconv(.c) noreturn {
@@ -26,9 +27,7 @@ pub export fn app_main(_: usize, _: usize, environment: *const api.abi.Environme
 
         const message = api.receive(true) catch continue;
 
-        api.reply(message, handle(message)) catch {
-
-        };
+        api.answer(message, handle(message));
 
     }
 
@@ -42,7 +41,7 @@ fn handle(message: api.Request) u64 {
     switch (operation) {
 
         .hello => return protocol.version,
-        .crash => return if (message.first == api.raw(.owner, 0, 0, 0).first) fault() else protocol.invalid,
+        .crash => return api.crash(message),
         .list, .read, .write, .create, .directory, .remove, .volume, .change, .rename => {
 
         },
@@ -102,11 +101,12 @@ fn serve(message: api.Request, operation: protocol.Operation, value: u56, name: 
         },
         .read => {
 
+            const node = try mounted.file(name, 4);
             var done: u64 = 0;
 
             while (done < message.fourth) {
 
-                const count = try mounted.read(name, value + done, chunk[0..@min(chunk.len, message.fourth - done)]);
+                const count = try mounted.get(node, value + done, chunk[0..@min(chunk.len, message.fourth - done)]);
                 if (count == 0) break;
 
                 try api.store(message, done, chunk[0..count]);
@@ -119,7 +119,10 @@ fn serve(message: api.Request, operation: protocol.Operation, value: u56, name: 
         },
         .write => {
 
+            if (payload == 0) return 0;
+
             const start = name.len + 1;
+            const node = try mounted.file(name, 2);
             var done: u64 = 0;
 
             while (done < payload) {
@@ -127,10 +130,12 @@ fn serve(message: api.Request, operation: protocol.Operation, value: u56, name: 
                 const count = @min(chunk.len, payload - done);
 
                 try api.fetch(message, start + done, chunk[0..count]);
-                try mounted.write(name, value + done, chunk[0..count]);
+                try mounted.put(node, value + done, chunk[0..count]);
                 done += count;
 
             }
+
+            try mounted.flush();
 
             return done;
 
@@ -210,12 +215,5 @@ fn code(err: anyerror) u64 {
         else => protocol.invalid,
 
     };
-
-}
-
-fn fault() noreturn {
-
-    asm volatile ("ud2");
-    api.exit(1);
 
 }

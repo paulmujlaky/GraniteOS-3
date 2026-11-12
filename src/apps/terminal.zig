@@ -145,9 +145,7 @@ fn serve() void {
     // A read the shell has given up on goes back empty, so the next one can wait instead.
     if (waiting) |request| if (api.ticks() - since > 80) {
 
-        api.reply(request, protocol.empty) catch {
-
-        };
+        api.answer(request, protocol.empty);
 
         waiting = null;
 
@@ -157,7 +155,7 @@ fn serve() void {
 
 fn handle(request: api.Request) void {
 
-    if (request.first != shell) return api.reply(request, protocol.denied) catch {};
+    if (request.first != shell) return api.answer(request, protocol.denied);
 
     switch (protocol.operation(request.second)) {
 
@@ -165,26 +163,24 @@ fn handle(request: api.Request) void {
 
             const length = @min(protocol.value(request.second), chunk.len, request.fourth);
 
-            api.fetch(request, 0, chunk[0..length]) catch return api.reply(request, protocol.invalid) catch {};
+            api.fetch(request, 0, chunk[0..length]) catch return api.answer(request, protocol.invalid);
             feed(chunk[0..length]);
             back = 0;
             window.invalidate(&view);
 
-            api.reply(request, 0) catch {
-
-            };
+            api.answer(request, 0);
 
         },
         .read => {
 
-            if (waiting) |old| api.reply(old, protocol.empty) catch {};
+            if (waiting) |old| api.answer(old, protocol.empty);
 
             waiting = request;
             since = api.ticks();
             deliver();
 
         },
-        else => api.reply(request, protocol.invalid) catch {},
+        else => api.answer(request, protocol.invalid),
 
     }
 
@@ -202,9 +198,7 @@ fn deliver() void {
     head = (head + 1) % input.len;
     queued -= 1;
 
-    api.reply(request, byte) catch {
-
-    };
+    api.answer(request, byte);
 
 }
 

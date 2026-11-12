@@ -1408,7 +1408,7 @@ fn describePreview() void {
     const wide: u32 = @intCast(@max(@divTrunc(@as(i64, tall) * size.width, size.height), 1));
     const built_in = wallpapers.find(path) orelse 0;
 
-    var next = decode(arena.allocator(), path) catch wallpapers.render(built_in, wide, tall) catch return;
+    var next = gui.Image.open(arena.allocator(), &files, path) catch wallpapers.render(built_in, wide, tall) catch return;
 
     next.fit = .cover;
 
@@ -1427,14 +1427,6 @@ fn describePreview() void {
     @memcpy(preview_path[0..path.len], path);
     preview_length = path.len;
     window.refresh();
-
-}
-
-fn decode(allocator: std.mem.Allocator, path: []const u8) !gui.Image {
-
-    if (path.len == 0) return error.Missing;
-
-    return gui.Image.decode(allocator, try files.load(allocator, path));
 
 }
 

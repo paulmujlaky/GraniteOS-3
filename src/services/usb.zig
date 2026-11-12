@@ -200,14 +200,12 @@ pub export fn app_main(_: usize, base: usize, environment: *const api.abi.Enviro
         const result: u64 = switch (protocol.operation(message.second)) {
 
             .hello => protocol.version,
-            .crash => if (message.first == api.raw(.owner, 0, 0, 0).first) fault() else protocol.invalid,
+            .crash => api.crash(message),
             else => protocol.invalid,
 
         };
 
-        api.reply(message, result) catch {
-
-        };
+        api.answer(message, result);
 
     }
 
@@ -865,12 +863,5 @@ fn write64(offset: usize, value: u64) void {
 
     write(offset, @truncate(value));
     write(offset + 4, @intCast(value >> 32));
-
-}
-
-fn fault() noreturn {
-
-    asm volatile ("ud2");
-    api.exit(1);
 
 }

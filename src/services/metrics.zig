@@ -74,9 +74,7 @@ fn answer(request: api.Request) void {
 
     };
 
-    api.reply(request, result) catch {
-
-    };
+    api.answer(request, result);
 
 }
 

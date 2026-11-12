@@ -1540,7 +1540,7 @@ pub const Code = struct {
 
                 };
 
-                list.limit = clip(limit, inner);
+                list.limit = inner.within(limit);
 
                 if (line == caret_line and range.empty() and owner.focused) list.fill(band, theme.raised);
 
@@ -1553,7 +1553,7 @@ pub const Code = struct {
 
                 }
 
-                list.limit = clip(limit, area);
+                list.limit = area.within(limit);
 
                 const row_start = start + piece.start;
                 const row_end = start + piece.end;
@@ -1587,7 +1587,7 @@ pub const Code = struct {
 
         }
 
-        list.limit = clip(limit, inner);
+        list.limit = inner.within(limit);
 
         // A thin thumb shows how far through the lines the view is.
         if (count > rows) {
@@ -1823,15 +1823,6 @@ fn shifted(offset: usize, splice: Splice) usize {
     if (offset >= splice.at + splice.remove) return offset - splice.remove + splice.insert.len;
 
     return splice.at + splice.insert.len;
-
-}
-
-/// `area` within `limit`, if any; an empty rectangle, which draws nothing, when they do not meet.
-fn clip(limit: ?Rect, area: Rect) Rect {
-
-    const outer = limit orelse return area;
-
-    return outer.intersect(area) orelse .{};
 
 }
 

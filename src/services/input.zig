@@ -78,14 +78,12 @@ pub export fn app_main(_: usize, _: usize, environment: *const api.abi.Environme
         const result: u64 = switch (protocol.operation(request.second)) {
 
             .hello => protocol.version,
-            .crash => if (request.first == api.raw(.owner, 0, 0, 0).first) fault() else protocol.invalid,
+            .crash => api.crash(request),
             else => protocol.invalid,
 
         };
 
-        api.reply(request, result) catch {
-
-        };
+        api.answer(request, result);
 
     }
 
@@ -356,12 +354,5 @@ fn input(port: u16) u8 {
 fn output(port: u16, byte: u8) void {
 
     if (api.raw(.port, port, 1, byte).number != 0) api.exit(1);
-
-}
-
-fn fault() noreturn {
-
-    asm volatile ("ud2");
-    api.exit(1);
 
 }

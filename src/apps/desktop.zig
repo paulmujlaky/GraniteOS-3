@@ -445,9 +445,7 @@ pub fn serve() void {
         };
 
         // A snip answers once it is saved or cancelled.
-        if (result) |value| api.reply(request, value) catch {
-
-        };
+        if (result) |value| api.answer(request, value);
 
     }
 
@@ -752,7 +750,7 @@ fn replace(choice: ?[]const u8) void {
     defer arena.deinit();
 
     const name = choice orelse "";
-    const chosen = if (wallpapers.find(name) != null) null else load(arena.allocator(), name) catch null;
+    const chosen = if (wallpapers.find(name) != null) null else gui.Image.open(arena.allocator(), &files, name) catch null;
     const which = if (chosen == null) wallpapers.find(name) orelse 0 else null;
 
     if (which != null and which == built_in) return;
@@ -774,13 +772,5 @@ fn replace(choice: ?[]const u8) void {
     built_in = which;
     wallpaper.refresh();
     session.redraw();
-
-}
-
-fn load(allocator: std.mem.Allocator, path: []const u8) !gui.Image {
-
-    if (path.len == 0) return error.Missing;
-
-    return gui.Image.decode(allocator, try files.load(allocator, path));
 
 }

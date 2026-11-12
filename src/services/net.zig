@@ -215,7 +215,6 @@ var xid: u32 = 0;
 var offered: u32 = 0;
 var offerer: u32 = 0;
 var lease_due: u64 = 0;
-var renew_at: u64 = 0;
 var expires: u64 = 0;
 
 /// The time-stamp counter's start, for timing echoes finer than a tick.
@@ -290,7 +289,7 @@ pub export fn app_main(_: usize, _: usize, environment: *const api.abi.Environme
 
         } else if (handle(request)) |result| {
 
-            answer(request, result);
+            api.answer(request, result);
 
         }
 
@@ -422,7 +421,7 @@ fn handle(request: api.Request) ?u64 {
     return switch (protocol.operation(request.second)) {
 
         .hello => protocol.version,
-        .crash => if (request.first == api.raw(.owner, 0, 0, 0).first) fault() else protocol.invalid,
+        .crash => api.crash(request),
         .info => describe(request),
         .list => count(request),
         .change => change(request),
@@ -778,7 +777,7 @@ fn close(request: api.Request, handle_value: u64) u64 {
 /// listener had not handed out.
 fn release(socket: *Socket) void {
 
-    if (socket.wait != .none) answer(socket.waiter, protocol.missing);
+    if (socket.wait != .none) api.answer(socket.waiter, protocol.missing);
     socket.wait = .none;
     socket.released = true;
 
@@ -909,7 +908,7 @@ fn settle(socket: *Socket) void {
     } orelse (if (late) protocol.empty else return);
 
     socket.wait = .none;
-    answer(request, result);
+    api.answer(request, result);
 
 }
 
@@ -1054,14 +1053,6 @@ fn pump(socket: *Socket) void {
         transmit(wire.tcp, socket.remote, header + payload.len);
 
     }
-
-}
-
-fn answer(request: api.Request, result: u64) void {
-
-    api.reply(request, result) catch {
-
-    };
 
 }
 
@@ -1654,7 +1645,7 @@ fn retry(query: *Query) void {
 /// Ends `query`, answering the app that waits on it; a clock query that failed tries again later.
 fn finish(query: *Query, result: u64) void {
 
-    if (query.waiter) |request| answer(request, result);
+    if (query.waiter) |request| api.answer(request, result);
     if (query.purpose == .clock) clock_due = api.ticks() + clock_retry;
 
     query.* = .{};
@@ -1757,12 +1748,5 @@ fn microseconds(start: u64) u64 {
     const rate = (stamp() -| stamp_start) / ticks;
 
     return if (rate == 0) 0 else (stamp() -| start) * 10000 / rate;
-
-}
-
-fn fault() noreturn {
-
-    asm volatile ("ud2");
-    api.exit(1);
 
 }

@@ -276,6 +276,15 @@ pub fn reply(request: Request, message: u64) ApiError!void {
 
 }
 
+/// Replies to `request`, when its caller is still there to hear it.
+pub fn answer(request: Request, message: u64) void {
+
+    reply(request, message) catch {
+
+    };
+
+}
+
 /// Exchanges `window` with a supervised service, looking it up afresh once if a restart replaced it.
 pub fn query(endpoint: *u64, image: abi.Image, message: u64, window: []u8) ServiceError!u64 {
 
@@ -533,9 +542,7 @@ pub fn greet(comptime handle: fn (Request) ?u64) u64 {
 
         }
 
-        if (handle(request)) |result| reply(request, result) catch {
-
-        };
+        if (handle(request)) |result| answer(request, result);
 
         if (protocol.operation(request.second) == .hello) return signals;
 
@@ -601,6 +608,23 @@ pub fn exit(status: u64) noreturn {
     _ = raw(.exit, status, 0, 0);
 
     while (true) asm volatile ("ud2");
+
+}
+
+/// Answers a service's `crash` request: faults when its owner sent it, so restarts can be tested, and refuses anyone else.
+pub fn crash(request: Request) u64 {
+
+    if (request.first != raw(.owner, 0, 0, 0).first) return protocol.invalid;
+
+    fault();
+
+}
+
+/// Ends the service with an invalid instruction, as a real fault would.
+pub fn fault() noreturn {
+
+    asm volatile ("ud2");
+    exit(1);
 
 }
 

@@ -103,9 +103,9 @@ pub fn find(disk: anytype, sector: *[512]u8, capacity: u64) Error!?Range {
     try disk.read(1, sector);
     if (!std.mem.eql(u8, sector[0..8], "EFI PART")) return null;
 
-    const table = read(u64, sector, 72);
-    const count = read(u32, sector, 80);
-    const size = read(u32, sector, 84);
+    const table = field(u64, sector, 72);
+    const count = field(u32, sector, 80);
+    const size = field(u32, sector, 84);
 
     if (size < 128 or 512 % size != 0 or table >= capacity) return null;
 
@@ -119,8 +119,8 @@ pub fn find(disk: anytype, sector: *[512]u8, capacity: u64) Error!?Range {
         const entry = sector[(index % per) * size ..][0..128];
         if (!std.mem.eql(u8, entry[0..16], &partition)) continue;
 
-        const first = read(u64, entry, 32);
-        const last = read(u64, entry, 40);
+        const first = field(u64, entry, 32);
+        const last = field(u64, entry, 40);
 
         if (first > last or last >= capacity) return error.Corrupt;
 
@@ -323,17 +323,19 @@ pub fn Volume(comptime Disk: type) type {
 
         pub fn read(self: *Self, path: []const u8, offset: u64, out: []u8) Error!usize {
 
-            const node = try self.file(path, 4);
-
-            return self.get(node, offset, out);
+            return self.get(try self.file(path, 4), offset, out);
 
         }
 
         pub fn write(self: *Self, path: []const u8, offset: u64, bytes: []const u8) Error!void {
 
-            const node = try self.file(path, 2);
+            try self.put(try self.file(path, 2), offset, bytes);
+            try self.disk.flush();
 
-            try self.put(node, offset, bytes);
+        }
+
+        pub fn flush(self: *Self) Error!void {
+
             try self.disk.flush();
 
         }
@@ -393,7 +395,8 @@ pub fn Volume(comptime Disk: type) type {
 
         }
 
-        fn file(self: *Self, path: []const u8, need: u16) Error!u64 {
+        /// The node of file `path` once `need` (4 read, 2 write) is checked, for `get` and `put` to reuse without resolving it again.
+        pub fn file(self: *Self, path: []const u8, need: u16) Error!u64 {
 
             const node = try self.resolve(path);
 
@@ -444,7 +447,7 @@ pub fn Volume(comptime Disk: type) type {
 
         }
 
-        fn get(self: *Self, id: u64, offset: u64, out: []u8) Error!usize {
+        pub fn get(self: *Self, id: u64, offset: u64, out: []u8) Error!usize {
 
             try self.open(id);
             if (offset >= self.node.size) return 0;
@@ -456,9 +459,22 @@ pub fn Volume(comptime Disk: type) type {
 
                 const position = offset + done;
                 const within = position % block_size;
+                const place = try self.locate(position / block_size);
+
+                // Whole blocks lying together on disk move in one transfer.
+                if (within == 0 and total - done >= block_size) {
+
+                    const size = @min(place.length, (total - done) / block_size) * block_size;
+
+                    try self.disk.read(try self.address(place.start, size), out[done..][0..size]);
+                    done += size;
+                    continue;
+
+                }
+
                 const size = @min(block_size - within, total - done);
 
-                try self.load(try self.locate(position / block_size), &self.data);
+                try self.load(place.start, &self.data);
                 @memcpy(out[done..][0..size], self.data[within..][0..size]);
                 done += size;
 
@@ -468,7 +484,8 @@ pub fn Volume(comptime Disk: type) type {
 
         }
 
-        fn put(self: *Self, id: u64, offset: u64, bytes: []const u8) Error!void {
+        /// Writes without flushing, so a caller writing a file piece by piece flushes once at the end.
+        pub fn put(self: *Self, id: u64, offset: u64, bytes: []const u8) Error!void {
 
             try self.open(id);
 
@@ -482,7 +499,18 @@ pub fn Volume(comptime Disk: type) type {
 
             while (position < end) : (position += block_size) {
 
-                const block = try self.locate(position / block_size);
+                const place = try self.locate(position / block_size);
+                const block = place.start;
+
+                if (position >= offset and end - position >= block_size) {
+
+                    const size = @min(place.length, (end - position) / block_size) * block_size;
+
+                    try self.disk.write(try self.address(block, size), bytes[position - offset ..][0..size]);
+                    position += size - block_size;
+                    continue;
+
+                }
 
                 if (position < old) {
 
@@ -520,7 +548,8 @@ pub fn Volume(comptime Disk: type) type {
 
         }
 
-        fn locate(self: *Self, index: u64) Error!u64 {
+        /// Where block `index` of `self.node` lies, and how many of its blocks lie together from there.
+        fn locate(self: *Self, index: u64) Error!Extent {
 
             var remaining = index;
             var page = &self.node;
@@ -530,7 +559,13 @@ pub fn Volume(comptime Disk: type) type {
 
                 for (page.extents[0..page.count]) |extent| {
 
-                    if (remaining < extent.length) return extent.start + remaining;
+                    if (remaining < extent.length) return .{
+
+                        .start = extent.start + remaining,
+                        .length = extent.length - remaining,
+
+                    };
+
                     remaining -= extent.length;
 
                 }
@@ -822,15 +857,22 @@ pub fn Volume(comptime Disk: type) type {
 
         fn load(self: *Self, block: u64, bytes: *[block_size]u8) Error!void {
 
-            if (block >= self.super.blocks) return error.Corrupt;
-            try self.disk.read(self.base + block * sectors, bytes);
+            try self.disk.read(try self.address(block, block_size), bytes);
 
         }
 
         fn save(self: *Self, block: u64, bytes: *const [block_size]u8) Error!void {
 
-            if (block >= self.super.blocks) return error.Corrupt;
-            try self.disk.write(self.base + block * sectors, bytes);
+            try self.disk.write(try self.address(block, block_size), bytes);
+
+        }
+
+        /// The sector of `block`, once `size` bytes from it are known to stay on the volume.
+        fn address(self: *const Self, block: u64, size: u64) Error!u64 {
+
+            if (block >= self.super.blocks or size / block_size > self.super.blocks - block) return error.Corrupt;
+
+            return self.base + block * sectors;
 
         }
 
@@ -877,7 +919,8 @@ fn mask(bit: u64) u8 {
 
 }
 
-fn read(comptime T: type, bytes: []const u8, offset: usize) T {
+/// The little-endian `T` at `offset`, as GPT and the volume store their fields.
+pub fn field(comptime T: type, bytes: []const u8, offset: usize) T {
 
     return std.mem.readInt(T, bytes[offset..][0..@sizeOf(T)], .little);
 

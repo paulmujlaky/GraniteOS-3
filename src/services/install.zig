@@ -37,9 +37,7 @@ pub export fn app_main(_: usize, base: usize, environment: *const api.abi.Enviro
 
         const message = api.receive(true) catch continue;
 
-        api.reply(message, handle(message)) catch {
-
-        };
+        api.answer(message, handle(message));
 
     }
 
@@ -50,7 +48,7 @@ fn handle(message: api.Request) u64 {
     switch (protocol.operation(message.second)) {
 
         .hello => return protocol.version,
-        .crash => return if (message.first == api.raw(.owner, 0, 0, 0).first) fault() else protocol.invalid,
+        .crash => return api.crash(message),
         .install => {
 
             // An unclaimed machine belongs to whoever sits at it, as with any OS installer.
@@ -239,12 +237,5 @@ fn map() ![]const u8 {
     }
 
     return @as([*]const u8, @ptrFromInt(first + location % 4096))[0..length];
-
-}
-
-fn fault() noreturn {
-
-    asm volatile ("ud2");
-    api.exit(1);
 
 }

@@ -170,7 +170,7 @@ pub export fn app_main(_: usize, _: usize, environment: *const api.abi.Environme
 
         } else if (handle(request)) |result| {
 
-            answer(request, result);
+            api.answer(request, result);
 
         }
 
@@ -522,7 +522,7 @@ fn handle(request: api.Request) ?u64 {
     return switch (protocol.operation(request.second)) {
 
         .hello => protocol.version,
-        .crash => if (request.first == api.raw(.owner, 0, 0, 0).first) fault() else protocol.invalid,
+        .crash => api.crash(request),
         .info => inform(request),
         .connect => connect(request, value),
         .wait => hold(request, value),
@@ -679,7 +679,7 @@ fn met(wait: Wait) bool {
 
 fn finish(wait: *Wait, result: u64) void {
 
-    answer(wait.request, result);
+    api.answer(wait.request, result);
     wait.active = false;
 
 }
@@ -792,20 +792,5 @@ fn save() void {
     _ = configuration.set("sounds", if (sounds) "on" else "off");
 
     configuration.save() catch api.log("audio: could not save the settings\n");
-
-}
-
-fn answer(request: api.Request, result: u64) void {
-
-    api.reply(request, result) catch {
-
-    };
-
-}
-
-fn fault() noreturn {
-
-    asm volatile ("ud2");
-    api.exit(1);
 
 }

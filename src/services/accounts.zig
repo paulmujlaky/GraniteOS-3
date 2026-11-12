@@ -84,9 +84,7 @@ pub export fn app_main(_: usize, _: usize, environment: *const api.abi.Environme
 
         const message = api.receive(true) catch continue;
 
-        api.reply(message, handle(message)) catch {
-
-        };
+        api.answer(message, handle(message));
 
         std.crypto.secureZero(u8, &input);
 
@@ -112,7 +110,7 @@ fn handle(message: api.Request) u64 {
     switch (operation) {
 
         .hello => return protocol.version,
-        .crash => return if (message.first == api.raw(.owner, 0, 0, 0).first) fault() else protocol.invalid,
+        .crash => return api.crash(message),
         .login, .logout, .create, .remove, .password, .list => {
 
         },
@@ -438,12 +436,5 @@ fn valid(name: []const u8) !void {
         if (!std.ascii.isLower(byte) and !std.ascii.isDigit(byte) and byte != '_' and byte != '-') return error.Invalid;
 
     }
-
-}
-
-fn fault() noreturn {
-
-    asm volatile ("ud2");
-    api.exit(1);
 
 }

@@ -19,24 +19,15 @@ pub export fn app_main(_: usize, _: usize, environment: *const api.abi.Environme
 
             .hello => protocol.version,
             .ping => @as(u64, protocol.value(request.second)) + 1,
-            .crash => if (request.first == api.raw(.owner, 0, 0, 0).first or options.self_test) fault() else protocol.invalid,
+            .crash => if (options.self_test) api.fault() else api.crash(request),
             .stall => if (options.self_test) continue else protocol.invalid,
 
             else => protocol.invalid,
 
         };
 
-        api.reply(request, result) catch {
-
-        };
+        api.answer(request, result);
 
     }
-
-}
-
-fn fault() noreturn {
-
-    asm volatile ("ud2");
-    api.exit(1);
 
 }

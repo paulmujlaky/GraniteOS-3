@@ -240,9 +240,7 @@ fn serve() void {
     served += 1;
     const result = if (protocol.operation(request.second) == .ping) served else protocol.invalid;
 
-    api.reply(request, result) catch {
-
-    };
+    api.answer(request, result);
 
 }
 

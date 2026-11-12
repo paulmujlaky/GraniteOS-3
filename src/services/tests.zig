@@ -275,6 +275,66 @@ test "volume persists fragmented files and directories and reclaims every block"
 
 }
 
+test "volume moves large unaligned spans across fragmented extents" {
+
+    const allocator = std.testing.allocator;
+
+    const disk = Memory{
+
+        .bytes = try allocator.alloc(u8, 8 << 20),
+
+    };
+
+    defer allocator.free(disk.bytes);
+    @memset(disk.bytes, 0);
+
+    const mounted = try allocator.create(volume.Volume(Memory));
+    defer allocator.destroy(mounted);
+
+    _ = try mounted.mount(disk, .{
+
+        .first = 0,
+        .sectors = disk.bytes.len / 512,
+
+    });
+
+    const span = try allocator.alloc(u8, 300_000);
+    const out = try allocator.alloc(u8, span.len + 2000);
+
+    defer allocator.free(span);
+    defer allocator.free(out);
+
+    for (span, 0..) |*byte, index| byte.* = @truncate(index *% 7 +% index / 251);
+
+    try mounted.create("/big", .file);
+    try mounted.create("/gap", .file);
+
+    // Growing another file between pieces leaves the big one in several extents.
+    for (0..6) |piece| {
+
+        const from = piece * 50_000;
+
+        try mounted.write("/big", 1234 + from, span[from..][0..50_000]);
+        try mounted.write("/gap", piece * 5000, span[0..5000]);
+
+    }
+
+    try std.testing.expectEqual(span.len + 1234, try mounted.read("/big", 0, out));
+    try std.testing.expect(std.mem.allEqual(u8, out[0..1234], 0));
+    try std.testing.expectEqualSlices(u8, span, out[1234..][0..span.len]);
+
+    // One write over every extent, aligned, then read back from an unaligned offset.
+    for (span) |*byte| byte.* ^= 0x5a;
+    try mounted.write("/big", 0, span);
+    try std.testing.expectEqual(span.len - 777, try mounted.read("/big", 777, out[0 .. span.len - 777]));
+    try std.testing.expectEqualSlices(u8, span[777..], out[0 .. span.len - 777]);
+    try std.testing.expectEqual(1234, try mounted.read("/big", span.len, out));
+
+    // The tail past the second write still holds the first, from before the bytes flipped.
+    for (span[span.len - 1234 ..], out[0..1234]) |now, before| try std.testing.expectEqual(now ^ 0x5a, before);
+
+}
+
 test "volume enforces owner and other permissions" {
 
     const allocator = std.testing.allocator;

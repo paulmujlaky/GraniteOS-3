@@ -286,20 +286,27 @@ pub fn message(line: u5, target: u32) struct { u64, u16 } {
 
 }
 
-/// Sends idle processors other than `self` a `wake` interrupt, one for each process waiting to run.
+/// Sends idle processors other than `self` a `wake` interrupt, one for each process waiting to run; with too few idle, busy
+/// processors that a process woke behind are interrupted too, so it need not wait out the timer.
 pub fn kick(self: *const Core) void {
 
     var left = schedule.waiting();
-    var current = cores;
 
-    while (current) |core| : (current = core.next) {
+    for ([_]bool{ false, true }) |busy| {
 
-        if (left == 0) return;
-        if (core == self or @atomicLoad(?*process.Process, &core.current, .monotonic) != null or !core.online.load(.acquire)) continue;
-        if (core.kicked.swap(true, .acq_rel)) continue;
+        var current = cores;
 
-        apic.send(core.id, 0x4000 | wake);
-        left -= 1;
+        while (current) |core| : (current = core.next) {
+
+            if (left == 0) return;
+            if (core == self or (@atomicLoad(?*process.Process, &core.current, .monotonic) != null) != busy or !core.online.load(.acquire)) continue;
+            if (busy and !schedule.urgent(core.id)) continue;
+            if (core.kicked.swap(true, .acq_rel)) continue;
+
+            apic.send(core.id, 0x4000 | wake);
+            left -= 1;
+
+        }
 
     }
 

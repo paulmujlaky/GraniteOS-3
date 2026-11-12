@@ -61,6 +61,15 @@ pub const Image = struct {
 
     }
 
+    /// A new image of the PNG file at `path`, read and decoded with `allocator`'s scratch space.
+    pub fn open(allocator: std.mem.Allocator, files: *api.Files, path: []const u8) !Image {
+
+        if (path.len == 0) return error.Missing;
+
+        return decode(allocator, try files.load(allocator, path));
+
+    }
+
     pub fn deinit(self: *Image) void {
 
         unpublish(self);

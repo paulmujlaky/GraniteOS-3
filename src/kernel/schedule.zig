@@ -33,6 +33,9 @@ pub const Processor = struct {
     ready: List = .{},
     queued: usize = 0,
 
+    /// A process woke into the queue since this processor last chose one, so the process it runs should give way.
+    woken: bool = false,
+
     /// Live processes homed here.
     homed: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
 
@@ -48,10 +51,21 @@ pub const Processor = struct {
 
     }
 
+    /// Queues a process that waited ahead of those that used up their time, so input and replies are answered promptly.
+    fn hurry(self: *Processor, task: *Process) void {
+
+        self.ready.prepend(&task.link);
+        self.queued += 1;
+        @atomicStore(bool, &self.woken, true, .release);
+
+    }
+
     fn take(self: *Processor, id: u32) ?*Process {
 
         self.lock.acquire();
         defer self.lock.release();
+
+        @atomicStore(bool, &self.woken, false, .release);
 
         const node = self.ready.popFirst() orelse return null;
         const task = Process.from("link", node);
@@ -136,7 +150,7 @@ pub fn wake(task: *Process) void {
     task.state = .ready;
 
     // A process that blocked on a processor still in the kernel is queued by that processor on letting go.
-    if (!task.held) self.push(task);
+    if (!task.held) self.hurry(task);
 
 }
 
@@ -199,7 +213,13 @@ pub fn release(id: u32, task: *Process, outcome: Outcome) Outcome {
     if (outcome == .yield) task.state = .ready;
 
     task.held = false;
-    if (task.state == .ready) self.push(task);
+
+    // One woken while still blocking never waited its turn out, unlike one that yields or ran out its time.
+    if (task.state == .ready) {
+
+        if (outcome == .block) self.hurry(task) else self.push(task);
+
+    }
 
     return outcome;
 
@@ -246,6 +266,13 @@ pub fn claim(task: *Process, holder: bool) bool {
     _ = self.homed.fetchSub(1, .monotonic);
 
     return true;
+
+}
+
+/// Whether a process woke into processor `id`'s queue since it last chose one.
+pub fn urgent(id: u32) bool {
+
+    return @atomicLoad(bool, &processors[id].woken, .acquire);
 
 }
 

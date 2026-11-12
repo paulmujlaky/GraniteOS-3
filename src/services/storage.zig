@@ -82,9 +82,7 @@ pub export fn app_main(_: usize, base: usize, environment: *const api.abi.Enviro
 
         const request = api.receive(true) catch continue;
 
-        api.reply(request, handle(request)) catch {
-
-        };
+        api.answer(request, handle(request));
 
     }
 
@@ -101,7 +99,7 @@ fn handle(request: api.Request) u64 {
         .read => transfer(request, false, value),
         .write => transfer(request, true, value),
         .flush => if (value < count and issue(&disks[value], 0xea, 0, 0, false, 0)) 0 else protocol.invalid,
-        .crash => if (request.first == api.raw(.owner, 0, 0, 0).first) fault() else protocol.invalid,
+        .crash => api.crash(request),
         else => protocol.invalid,
 
     };
@@ -228,8 +226,9 @@ fn issue(disk: *const Disk, command: u8, lba: u64, sectors: u16, write: bool, by
     port(disk.port, .issue).* = 1;
 
     const deadline = api.ticks() + 500;
+    var polls: usize = 0;
 
-    while (port(disk.port, .issue).* & 1 != 0) {
+    while (port(disk.port, .issue).* & 1 != 0) : (polls += 1) {
 
         if (port(disk.port, .status).* & 1 << 30 != 0 or api.ticks() >= deadline) {
 
@@ -238,7 +237,8 @@ fn issue(disk: *const Disk, command: u8, lba: u64, sectors: u16, write: bool, by
 
         }
 
-        _ = api.raw(.yield, 0, 0, 0);
+        // Most commands finish within a few polls, and yielding to a busy processor could cost a whole time slice.
+        if (polls < 256) std.atomic.spinLoopHint() else _ = api.raw(.yield, 0, 0, 0);
 
     }
 
@@ -287,12 +287,5 @@ fn wait(register: *volatile u32, mask: u32, value: u32, duration: u64) bool {
 fn port(index: usize, register: Port) *volatile u32 {
 
     return &registers[(0x100 + index * 0x80 + @intFromEnum(register)) / 4];
-
-}
-
-fn fault() noreturn {
-
-    asm volatile ("ud2");
-    api.exit(1);
 
 }
