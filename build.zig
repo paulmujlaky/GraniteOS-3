@@ -135,12 +135,6 @@ pub fn build(b: *std.Build) void {
 
     });
 
-    const pictures = b.createModule(.{
-
-        .root_source_file = b.path("src/pictures/root.zig"),
-
-    });
-
     const images = std.enums.values(abi.Image);
 
     // The supervisor comes first; the kernel starts it rather than embedding it as an image.
@@ -181,7 +175,6 @@ pub fn build(b: *std.Build) void {
         program.root_module.addImport("api", api);
         program.root_module.addImport("gui", gui);
         program.root_module.addImport("media", media);
-        program.root_module.addImport("pictures", pictures);
         program.root_module.addOptions("options", options);
         program.root_module.addAssemblyFile(b.path("src/user/asm/entry.S"));
         program.setLinkerScript(b.path("src/user/asm/link.ld"));

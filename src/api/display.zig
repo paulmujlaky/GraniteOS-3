@@ -388,6 +388,13 @@ pub const Display = struct {
 
     }
 
+    /// Session only: draws the accent as `gui.theme.accents[index]`, as the user chose.
+    pub fn accent(self: *Display, index: u8) api.ServiceError!void {
+
+        _ = try self.request(.accent, index, &.{});
+
+    }
+
     /// Makes the shared pixels `handle`, `width` by `height` premultiplied 0xAARRGGBB, drawable by image commands; again after changing them,
     /// naming the `changed` area when only that did, so less goes to the GPU.
     pub fn image(self: *Display, handle: u64, width: u32, height: u32, changed: ?Area) api.ServiceError!void {

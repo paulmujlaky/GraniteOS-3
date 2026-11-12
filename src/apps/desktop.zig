@@ -7,8 +7,9 @@ const about = @import("about.zig");
 const catalog = @import("catalog.zig");
 const clips = @import("clips.zig");
 const controls = @import("controls.zig");
+const status = @import("status.zig");
 const dock = @import("dock.zig");
-const granite = @import("granite.zig");
+const wallpapers = @import("wallpapers.zig");
 const launcher = @import("launcher.zig");
 const notices = @import("notices.zig");
 const pins = @import("pins.zig");
@@ -59,13 +60,13 @@ pub var wallpaper: gui.Window = undefined;
 var bar: gui.Window = undefined;
 
 /// Every surface of the desktop, for the event loop.
-var surfaces: [14]*gui.Window = undefined;
+var surfaces: [15]*gui.Window = undefined;
 
 /// The picture behind everything, shared with the lock screen.
 pub var backdrop: gui.Image = undefined;
 
-/// Whether the backdrop is granite rather than the user's picture.
-var plain = true;
+/// Which built-in wallpaper the backdrop is, or null for the user's picture.
+var built_in: ?usize = 0;
 
 var painting = gui.picture(&backdrop, .{
 
@@ -83,30 +84,19 @@ var scenery = gui.box(.{
 
 var files = api.Files{};
 
-/// The `desktop` config, where Settings saves the wallpaper as `wallpaper=PATH`, and `quartz=off` when Quartz draws solid.
+/// The `desktop` config, where Settings saves the wallpaper as `wallpaper=PATH` or a built-in's name, `quartz=off` when Quartz
+/// draws solid, and `accent=NAME`.
 var preferences = api.Config{};
 
 /// Whether Quartz shows what lies behind it, as the user chose.
-var translucent = true;
+pub var translucent = true;
+
+/// The accent the user chose, as an index into `theme.accents`.
+var tone: u8 = 0;
 
 // Top bar.
-var apps_icon = gui.icon(.grid, theme.icon);
 
-var apps_label = gui.label("Apps", .{
-
-    .size = theme.small,
-
-});
-
-var apps_parts = [_]*gui.Node{ &apps_icon, &apps_label };
-var apps = gui.box(chip, &apps_parts);
-
-var title = gui.label("", .{
-
-    .grow = 1,
-    .size = theme.small,
-
-});
+var spring = gui.box(theme.spring, &.{});
 
 var time_bytes: [32]u8 = undefined;
 
@@ -116,7 +106,16 @@ var time = gui.label("", .{
 
 });
 
-/// The date and time, which open the quick settings.
+/// The network and the volume at a glance, which open the quick settings.
+var network_icon = gui.icon(.ethernet, theme.icon);
+var sound_icon = gui.icon(.volume_high, theme.icon);
+var tray_parts = [_]*gui.Node{ &network_icon, &sound_icon };
+var tray = gui.box(chip, &tray_parts);
+
+/// When the tray last read the network and the volume, in `api.clock` seconds.
+var looked: u64 = 0;
+
+/// The date and time, which open the calendar.
 var clock_parts = [_]*gui.Node{ &time };
 var clock = gui.box(chip, &clock_parts);
 
@@ -130,7 +129,7 @@ var user_label = gui.label("", .{
 
 var user_parts = [_]*gui.Node{ &user_icon, &user_label };
 var user = gui.box(chip, &user_parts);
-var bar_parts = [_]*gui.Node{ &apps, &title, &clock, &user };
+var bar_parts = [_]*gui.Node{ &clock, &spring, &tray, &user };
 
 var bar_root = gui.box(.{
 
@@ -181,8 +180,8 @@ var restarted: u64 = 0;
 /// Opens every surface: the wallpaper now, the rest hidden until a session starts.
 pub fn init() void {
 
-    apps.action = &toggle;
     clock.action = &settle;
+    tray.action = &adjust;
     user.action = &reveal;
 
     const screen = while (true) break gui.screen() catch {
@@ -192,11 +191,8 @@ pub fn init() void {
 
     };
 
-    var scratch = std.heap.ArenaAllocator.init(api.pages);
-
-    backdrop = granite.load(scratch.allocator()) catch api.exit(3);
+    backdrop = wallpapers.render(0, @intCast(screen.width), @intCast(screen.height)) catch api.exit(3);
     backdrop.fit = .cover;
-    scratch.deinit();
 
     backdrop.publish() catch {
 
@@ -221,12 +217,7 @@ pub fn init() void {
 
     dock.init();
 
-    launcher.init(.{
-
-        .x = gui.px(margin),
-        .y = gui.px(height + margin),
-
-    });
+    launcher.init(launcher.spot(screen, gui.px(dock.reach)));
 
     account_menu.init(null);
     desktop_menu.init(null);
@@ -236,9 +227,10 @@ pub fn init() void {
     switcher.init(screen);
     clips.init(screen);
     controls.init();
+    status.init();
     about.init();
     snip.init();
-    surfaces = .{ &wallpaper, &bar, &dock.window, &launcher.window, &account_menu.window, &desktop_menu.window, &pins.app_menu.window, &shortcuts.menu.window, &notices.window, &switcher.window, &clips.window, &controls.window, &about.window, &snip.window };
+    surfaces = .{ &wallpaper, &bar, &dock.window, &launcher.window, &account_menu.window, &desktop_menu.window, &pins.app_menu.window, &shortcuts.menu.window, &notices.window, &switcher.window, &clips.window, &controls.window, &status.window, &about.window, &snip.window };
 
     place(screen);
 
@@ -275,6 +267,10 @@ fn claim() void {
     };
 
     gui.display.quartz(translucent) catch {
+
+    };
+
+    gui.display.accent(tone) catch {
 
     };
 
@@ -316,8 +312,17 @@ pub fn tick() void {
     }
 
     controls.tick();
+    status.tick();
 
     const now = api.clock();
+
+    if (now != looked and !bar.surface.hidden) {
+
+        looked = now;
+        indicate();
+
+    }
+
     if (now / 60 == minute or bar.surface.hidden) return;
 
     const date = api.Date.init(now);
@@ -381,7 +386,7 @@ pub fn react(input: gui.Input) bool {
 
                 switch (event.char | 0x20) {
 
-                    ' ', 'a' => toggle(&apps),
+                    ' ', 'a' => toggle(),
                     'l' => session.lock(),
                     's' => snip.take(if (event.modifiers.shift) .region else .screen, home),
                     'e' => start_app(.explorer, home),
@@ -479,12 +484,7 @@ fn place(screen: gui.Rect) void {
     dock.place(screen);
     shortcuts.redraw();
     notices.place(screen, gui.px(height));
-    launcher.place(.{
-
-        .x = gui.px(margin),
-        .y = gui.px(height + margin),
-
-    });
+    launcher.place(launcher.spot(screen, gui.px(dock.reach)));
     switcher.place(screen);
     clips.place(screen);
 
@@ -500,17 +500,10 @@ fn rescale() void {
 
 }
 
-/// Reads the window list again and updates the dock and the bar's title.
+/// Reads the window list again and updates the dock.
 fn refresh() void {
 
     count = gui.display.windows(&listed) catch 0;
-    title.content.label = "";
-
-    for (listed[0..count]) |*window| {
-
-        if (window.state.focused) title.content.label = window.name();
-
-    }
 
     // A window taking focus means the pointer went elsewhere, so open menus close; other changes, such as a menu opening, leave them.
     const now = if (focused()) |window| window.id else null;
@@ -569,25 +562,57 @@ pub fn start_app(image: api.abi.Image, argument: []const u8) void {
 
 }
 
-fn toggle(_: *gui.Node) void {
+/// Opens the launcher above the dock, or closes it.
+pub fn toggle() void {
 
     if (launcher.shown()) return dismiss();
 
     dismiss();
-    apps.selected = true;
+    dock.opened(true);
     launcher.show();
-    bar.refresh();
 
 }
 
-/// Opens the quick settings under the date and time, or closes them.
+/// Opens the calendar under the date and time, or closes it.
 fn settle(_: *gui.Node) void {
 
     if (controls.shown()) return dismiss();
 
     dismiss();
     clock.selected = true;
-    controls.show(.{ .x = wallpaper.surface.list.width - gui.px(margin), .y = gui.px(height + margin) });
+    controls.show(.{ .x = gui.px(margin), .y = gui.px(height + margin) });
+    bar.refresh();
+
+}
+
+/// Opens the quick settings under the tray, or closes them.
+fn adjust(_: *gui.Node) void {
+
+    if (status.shown()) return dismiss();
+
+    dismiss();
+    tray.selected = true;
+    status.show(.{ .x = tray.rect.right(), .y = gui.px(height + margin) });
+    bar.refresh();
+
+}
+
+/// Shows the network, faint while offline, and the volume in the tray, hiding either the system lacks.
+pub fn indicate() void {
+
+    const net = api.net.status() catch null;
+    const sound = api.audio.status() catch null;
+
+    const shade: u32 = if (net) |state| (if (state.online()) theme.text else theme.faint) else theme.text;
+    const speaker = if (sound) |state| status.speakerIcon(state).text() else sound_icon.content.label;
+
+    if (network_icon.hidden == (net == null) and network_icon.style.color == shade and sound_icon.hidden == (sound == null) and std.mem.eql(u8, sound_icon.content.label, speaker)) return;
+
+    network_icon.hidden = net == null;
+    network_icon.style.color = shade;
+    sound_icon.hidden = sound == null;
+    sound_icon.content.label = speaker;
+    tray.hidden = network_icon.hidden and sound_icon.hidden;
     bar.refresh();
 
 }
@@ -627,9 +652,11 @@ pub fn dismiss() void {
     shortcuts.menu.hide();
     clips.hide();
     controls.hide();
+    status.hide();
 
-    apps.selected = false;
+    dock.opened(false);
     clock.selected = false;
+    tray.selected = false;
     user.selected = false;
     bar.refresh();
 
@@ -681,37 +708,57 @@ fn shutdown() void {
 
 }
 
-/// Shows Quartz and, unless only that changed, the wallpaper as the user chose in Settings: granite when there is none or it will
-/// not load.
+/// Shows Quartz and the accent and, unless only those changed, the wallpaper as the user chose in Settings: the first built-in
+/// when there is none or it will not load.
 fn reload(what: catalog.Reload) void {
 
     if (what == .weather) return controls.load(user_label.content.label);
 
     preferences.open(user_label.content.label, "desktop");
     translucent = !std.mem.eql(u8, preferences.get("quartz") orelse "", "off");
+    tone = theme.accentNamed(preferences.get("accent") orelse "");
 
     gui.display.quartz(translucent) catch {
 
     };
 
-    if (what == .quartz) return;
+    gui.display.accent(tone) catch {
+
+    };
+
+    if (what == .quartz or what == .accent) return;
 
     replace(preferences.get("wallpaper"));
     pins.load(user_label.content.label);
 
 }
 
-/// Swaps the backdrop for the PNG at `path`, or granite when null or unreadable.
-fn replace(path: ?[]const u8) void {
+/// Saves whether Quartz shows what lies behind it for the signed-in user, as Settings does, and shows it.
+pub fn translucency(on: bool) void {
+
+    preferences.open(user_label.content.label, "desktop");
+
+    if (!preferences.set("quartz", if (on) "on" else "off")) return;
+
+    preferences.save() catch return;
+    reload(.quartz);
+
+}
+
+/// Swaps the backdrop for the built-in wallpaper or PNG `choice` names, or the first built-in when null or unreadable.
+fn replace(choice: ?[]const u8) void {
 
     var arena = std.heap.ArenaAllocator.init(api.pages);
     defer arena.deinit();
 
-    const chosen = load(arena.allocator(), path orelse "") catch null;
+    const name = choice orelse "";
+    const chosen = if (wallpapers.find(name) != null) null else load(arena.allocator(), name) catch null;
+    const which = if (chosen == null) wallpapers.find(name) orelse 0 else null;
 
-    if (chosen == null and plain) return;
+    if (which != null and which == built_in) return;
 
-    var next = chosen orelse granite.load(arena.allocator()) catch return;
+    const area = wallpaper.surface.list.bounds();
+    var next = chosen orelse wallpapers.render(which.?, @intCast(area.width), @intCast(area.height)) catch return;
 
     next.fit = .cover;
 
@@ -724,7 +771,7 @@ fn replace(path: ?[]const u8) void {
 
     backdrop.deinit();
     backdrop = next;
-    plain = chosen == null;
+    built_in = which;
     wallpaper.refresh();
     session.redraw();
 

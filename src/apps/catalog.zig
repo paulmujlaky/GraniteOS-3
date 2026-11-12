@@ -14,7 +14,7 @@ pub const Category = enum {
     productivity,
     creative,
     internet,
-    system,
+    utilities,
 
     pub fn title(self: Category) []const u8 {
 
@@ -23,7 +23,7 @@ pub const Category = enum {
             .productivity => "Productivity",
             .creative => "Creative",
             .internet => "Internet",
-            .system => "System",
+            .utilities => "Utilities",
 
         };
 
@@ -36,7 +36,7 @@ pub const Category = enum {
             .productivity => .document,
             .creative => .palette,
             .internet => .globe,
-            .system => .cpu,
+            .utilities => .settings,
 
         };
 
@@ -51,6 +51,7 @@ pub const Reload = enum(u8) {
     all,
     quartz,
     weather,
+    accent,
 
 };
 
@@ -66,9 +67,9 @@ pub const App = struct {
 
 pub const apps = [_]App{
 
-    .{ .image = .explorer, .category = .system, .title = "Files", .icon = .folder, .summary = "Browse and organise your files" },
+    .{ .image = .explorer, .category = .utilities, .title = "Files", .icon = .folder, .summary = "Browse and organise your files" },
     .{ .image = .editor, .category = .productivity, .title = "Editor", .icon = .edit, .summary = "Write text and code" },
-    .{ .image = .terminal, .category = .system, .title = "Terminal", .icon = .terminal, .summary = "Run OBSIDIAN shell commands" },
+    .{ .image = .terminal, .category = .utilities, .title = "Terminal", .icon = .terminal, .summary = "Run OBSIDIAN shell commands" },
     .{ .image = .viewer, .category = .creative, .title = "Viewer", .icon = .image, .summary = "Look at pictures" },
     .{ .image = .player, .category = .creative, .title = "Player", .icon = .music, .summary = "Play music and videos" },
     .{ .image = .drawing, .category = .creative, .title = "Drawing", .icon = .brush, .summary = "Sketch and paint pictures" },
@@ -79,8 +80,8 @@ pub const apps = [_]App{
     .{ .image = .weather, .category = .internet, .title = "Weather", .icon = .cloud_sun, .summary = "Conditions and forecasts where you are" },
     .{ .image = .requests, .category = .internet, .title = "Requests", .icon = .send, .summary = "Send HTTP requests and read the replies" },
     .{ .image = .radio, .category = .internet, .title = "Radio", .icon = .radio, .summary = "Listen to radio stations from around the world" },
-    .{ .image = .monitor, .category = .system, .title = "Monitor", .icon = .activity, .summary = "Watch processes, memory, and processors" },
-    .{ .image = .settings, .category = .system, .title = "Settings", .icon = .settings, .summary = "Display, appearance, and accounts" },
+    .{ .image = .monitor, .category = .utilities, .title = "Monitor", .icon = .activity, .summary = "Watch processes, memory, and processors" },
+    .{ .image = .settings, .category = .utilities, .title = "Settings", .icon = .settings, .summary = "Display, appearance, and accounts" },
 
 };
 

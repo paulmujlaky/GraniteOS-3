@@ -133,6 +133,7 @@ pub const Icon = enum(u21) {
     drizzle = 0xe08a,
     edit = 0xe172,
     eraser = 0xe28f,
+    ethernet = 0xe625,
     eye = 0xe0ba,
     fast_forward = 0xe0bd,
     file = 0xe0c0,

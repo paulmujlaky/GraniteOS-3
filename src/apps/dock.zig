@@ -17,6 +17,9 @@ const Image = api.abi.Image;
 const slot = 46;
 const margin = 8;
 
+/// Corners of the buttons; the dock's own sit `margin` further out, so the two curves stay parallel.
+const curve = 16;
+
 /// The rows the dock keeps at the bottom of the screen, out of maximised windows' way.
 pub const reach = slot + 4 * margin;
 
@@ -34,7 +37,17 @@ var divider = gui.box(theme.divider.with(.{
 
 }), &.{});
 
-var parts: [catalog.apps.len + 1]*gui.Node = undefined;
+/// Opens the launcher, apart from the apps at the dock's left end.
+var launch: gui.Node = undefined;
+
+var launch_divider = gui.box(theme.divider.with(.{
+
+    .height = slot - 2 * margin,
+    .background = gui.shade(0xffffff, 48),
+
+}), &.{});
+
+var parts: [catalog.apps.len + 3]*gui.Node = undefined;
 
 var root = gui.box(.{
 
@@ -47,7 +60,7 @@ var root = gui.box(.{
     .quartz = true,
     .border = theme.line,
     .border_width = theme.border,
-    .radius = 16,
+    .radius = curve + margin,
 
 }, &.{});
 
@@ -61,6 +74,18 @@ var held: ?struct { image: Image, drag: gui.Drag } = null;
 
 pub fn init() void {
 
+    launch = gui.tool(.grid, &openLauncher);
+
+    launch.style = launch.style.with(.{
+
+        .width = slot,
+        .height = slot,
+
+        .size = 22,
+        .radius = curve,
+
+    });
+
     for (catalog.apps, 0..) |app, index| {
 
         buttons[index] = gui.tool(app.icon, &pick);
@@ -71,7 +96,7 @@ pub fn init() void {
             .height = slot,
 
             .size = 22,
-            .radius = 12,
+            .radius = curve,
 
         });
 
@@ -132,7 +157,10 @@ pub fn init() void {
 /// Lines the apps up again after the pins or the windows change, resizing the dock to fit them.
 pub fn arrange() void {
 
-    var length: usize = 0;
+    parts[0] = &launch;
+    parts[1] = &launch_divider;
+
+    var length: usize = 2;
 
     for (pins.docked[0..pins.docked_count]) |image| {
 
@@ -185,6 +213,22 @@ pub fn place(area: gui.Rect) void {
     if (now.x == goal.x and now.y == goal.y and now.width == goal.width and now.height == goal.height) return window.refresh();
 
     window.move(goal);
+
+}
+
+/// Marks the launcher's button as showing it, or not.
+pub fn opened(on: bool) void {
+
+    if (launch.selected == on) return;
+
+    launch.selected = on;
+    window.refresh();
+
+}
+
+fn openLauncher(_: *gui.Node) void {
+
+    desktop.toggle();
 
 }
 

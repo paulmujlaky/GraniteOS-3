@@ -1,5 +1,5 @@
-//! Quick settings under the bar's date and time: the time and date, the weather where Weather last looked, a month calendar
-//! to page through, the volume, and a switch for each setting, starting with the network. The volume keys work here too.
+//! The panel under the bar's date and time: the date beside the weather where Weather last looked, over a month calendar to
+//! page through.
 
 const std = @import("std");
 
@@ -16,42 +16,6 @@ const Day = days.Day;
 
 const width = 320;
 
-/// A switch the panel offers: what it shows, how it reads its state into a short detail, and how it flips.
-const Tile = struct {
-
-    icon: gui.Icon,
-    title: []const u8,
-
-    /// Whether it is on, with its detail written into `bytes`; null hides the switch, as when there is nothing to switch.
-    read: *const fn (bytes: []u8) ?State,
-    flip: *const fn (on: bool) void,
-
-};
-
-const State = struct {
-
-    on: bool,
-    detail: []const u8,
-
-};
-
-const tiles = [_]Tile{
-
-    .{ .icon = .globe, .title = "Network", .read = network, .flip = power },
-
-};
-
-/// A group of the panel's contents, raised a little from it.
-const card = gui.Style{
-
-    .padding = .all(10),
-    .gap = 6,
-
-    .radius = theme.corner,
-    .background = gui.shade(0xffffff, 10),
-
-};
-
 /// A day of the month: its number over a holiday's dot.
 const day_style = gui.Style{
 
@@ -63,12 +27,36 @@ const day_style = gui.Style{
 
 };
 
-const row_style = gui.Style{
+// The date.
+var date_bytes: [48]u8 = undefined;
 
-    .height = 48,
+var date = gui.label("", .{
+
+    .grow = 1,
+    .padding = .axes(0, 6),
+
+});
+
+// The weather, which opens Weather.
+var degrees_bytes: [16]u8 = undefined;
+
+var sky_icon = gui.icon(.sun, theme.icon.with(.{
+
+    .width = 20,
+    .size = 18,
+
+}));
+
+var degrees = gui.label("", .{});
+
+var weather_parts = [_]*gui.Node{ &sky_icon, &degrees };
+
+var weather = gui.box(.{
+
+    .height = 32,
     .padding = .axes(0, 8),
     .direction = .row,
-    .gap = 12,
+    .gap = 6,
     .items = .center,
 
     .radius = theme.radius,
@@ -79,123 +67,18 @@ const row_style = gui.Style{
 
     },
 
-};
+}, &weather_parts);
 
-// The time and date.
-var hour_bytes: [8]u8 = undefined;
+var day_parts = [_]*gui.Node{ &date, &weather };
 
-var hour = gui.label("", .{
-
-    .size = 40,
-
-});
-
-var half = gui.label("", .{
-
-    .padding = .{
-
-        .bottom = 7,
-
-    },
-    .size = 17,
-    .color = theme.muted,
-
-});
-
-var hour_parts = [_]*gui.Node{ &hour, &half };
-
-var hour_row = gui.box(.{
+var day_row = gui.box(.{
 
     .direction = .row,
-    .gap = 6,
-    .items = .end,
-
-}, &hour_parts);
-
-var date_bytes: [48]u8 = undefined;
-var date = gui.label("", theme.caption);
-var header_parts = [_]*gui.Node{ &hour_row, &date };
-
-var header = gui.box(.{
-
-    .padding = .{
-
-        .top = 6,
-        .right = 6,
-        .bottom = 2,
-        .left = 6,
-
-    },
-    .gap = 2,
-
-}, &header_parts);
-
-// The weather, which opens Weather.
-var place = gui.label("", theme.caption);
-var degrees_bytes: [16]u8 = undefined;
-
-var degrees = gui.label("", .{
-
-    .size = 28,
-
-});
-
-var sky = gui.label("", .{
-
-    .padding = .{
-
-        .bottom = 4,
-
-    },
-    .color = theme.muted,
-
-});
-
-var reading_parts = [_]*gui.Node{ &degrees, &sky };
-
-var reading = gui.box(.{
-
-    .direction = .row,
-    .gap = 8,
-    .items = .end,
-
-}, &reading_parts);
-
-var outlook_parts = [_]*gui.Node{ &place, &reading };
-
-var outlook = gui.box(.{
-
-    .grow = 1,
-    .gap = 2,
-
-}, &outlook_parts);
-
-var sky_icon = gui.icon(.sun, theme.icon.with(.{
-
-    .width = 44,
-    .height = 44,
-    .size = 34,
-
-}));
-
-var weather_parts = [_]*gui.Node{ &outlook, &sky_icon };
-
-var weather = gui.box(card.with(.{
-
-    .padding = gui.Edges.axes(10, 12),
-    .direction = .row,
-    .gap = 10,
     .items = .center,
 
-    .hover = .{
+}, &day_parts);
 
-        .background = gui.shade(0xffffff, 18),
-
-    },
-
-}), &weather_parts);
-
-/// Whose brief the card shows, empty while no one is signed in, and the unit they read it in.
+/// Whose brief the weather shows, empty while no one is signed in, and the unit they read it in.
 var owner: []const u8 = "";
 var brief: ?forecast.Brief = null;
 var unit = forecast.Unit.fahrenheit;
@@ -264,58 +147,14 @@ var grid = gui.box(.{
 }, &week_list);
 
 var calendar_parts = [_]*gui.Node{ &month_row, &head_row, &grid };
-var calendar = gui.box(card, &calendar_parts);
 
-// The volume, beside a button that mutes it; hidden without an audio device.
-var speaker = gui.tool(.volume_high, &silence);
-var level = gui.Slider{ .changed = &slide };
-var level_node: gui.Node = undefined;
-var percent_bytes: [8]u8 = undefined;
+var calendar = gui.box(.{
 
-var percent = gui.label("", theme.caption.with(.{
+    .gap = 6,
 
-    .width = 40,
-    .text_align = .right,
+}, &calendar_parts);
 
-}));
-
-var sound_parts = [_]*gui.Node{ &speaker, &level_node, &percent };
-
-var sound = gui.box(card.with(.{
-
-    .padding = gui.Edges.axes(6, 10),
-    .direction = .row,
-    .gap = 8,
-    .items = .center,
-
-}), &sound_parts);
-
-/// Percent the volume keys move the volume by.
-const step = 5;
-
-// The switches.
-var icons: [tiles.len]gui.Node = undefined;
-var titles: [tiles.len]gui.Node = undefined;
-var details: [tiles.len]gui.Node = undefined;
-var detail_bytes: [tiles.len][32]u8 = undefined;
-var lit = [_]bool{false} ** tiles.len;
-var words: [tiles.len][2]*gui.Node = undefined;
-var texts: [tiles.len]gui.Node = undefined;
-var knobs: [tiles.len]gui.Node = undefined;
-var knob_parts: [tiles.len][1]*gui.Node = undefined;
-var tracks: [tiles.len]gui.Node = undefined;
-var row_parts: [tiles.len][3]*gui.Node = undefined;
-var rows: [tiles.len]gui.Node = undefined;
-var row_list: [tiles.len]*gui.Node = undefined;
-
-var switches = gui.box(card.with(.{
-
-    .padding = gui.Edges.all(4),
-    .gap = 2,
-
-}), &row_list);
-
-var root_parts = [_]*gui.Node{ &header, &weather, &calendar, &sound, &switches };
+var root_parts = [_]*gui.Node{ &day_row, &calendar };
 
 var root = gui.box(theme.popup.with(.{
 
@@ -330,22 +169,16 @@ pub var window: gui.Window = undefined;
 var page = Day{ .year = 1970, .month = 1, .day = 1 };
 var now = Day{ .year = 1970, .month = 1, .day = 1 };
 
-/// Where the panel's top right corner goes.
+/// Where the panel's top left corner goes.
 var corner = gui.Point{};
 
-/// When an open panel next reads the time and its switches again.
+/// When an open panel next reads the time again.
 var due: u64 = 0;
 
 pub fn init() void {
 
     month.action = &current;
     weather.action = &look;
-
-    level_node = level.node(.{
-
-        .grow = 1,
-
-    });
 
     for (&heads, 0..) |*head, index| {
 
@@ -434,59 +267,6 @@ pub fn init() void {
 
     }
 
-    for (tiles, 0..) |tile, index| {
-
-        icons[index] = gui.icon(tile.icon, theme.icon.with(.{
-
-            .width = 30,
-            .height = 30,
-
-            .radius = 15,
-
-        }));
-
-        titles[index] = gui.label(tile.title, .{});
-        details[index] = gui.label("", theme.caption);
-        words[index] = .{ &titles[index], &details[index] };
-
-        texts[index] = gui.box(.{
-
-            .grow = 1,
-            .gap = 2,
-
-        }, &words[index]);
-
-        knobs[index] = gui.box(.{
-
-            .width = 16,
-            .height = 16,
-
-            .radius = 8,
-
-        }, &.{});
-
-        knob_parts[index] = .{&knobs[index]};
-
-        tracks[index] = gui.box(.{
-
-            .width = 36,
-            .height = 20,
-            .padding = .all(2),
-            .direction = .row,
-            .items = .center,
-
-            .radius = 10,
-
-        }, &knob_parts[index]);
-
-        row_parts[index] = .{ &icons[index], &texts[index], &tracks[index] };
-        rows[index] = gui.box(row_style, &row_parts[index]);
-        rows[index].action = &choose;
-        rows[index].data = index;
-        row_list[index] = &rows[index];
-
-    }
-
     window = gui.Window.open(&root, .{
 
         .layer = .panel,
@@ -502,7 +282,7 @@ pub fn init() void {
 
 }
 
-/// Opens the panel on this month, with its top right corner at `at`.
+/// Opens the panel on this month, with its top left corner at `at`.
 pub fn show(at: gui.Point) void {
 
     corner = at;
@@ -514,7 +294,7 @@ pub fn show(at: gui.Point) void {
 
 }
 
-/// Reads the brief and unit of user `name` again, as after Weather changed them; an empty name clears the card.
+/// Reads the brief and unit of user `name` again, as after Weather changed them; an empty name clears the weather.
 pub fn load(name: []const u8) void {
 
     owner = name;
@@ -537,7 +317,7 @@ pub fn shown() bool {
 
 }
 
-/// Keeps an open panel's time and switches current, every second, and the brief fresh; call it every pass of the event loop.
+/// Keeps an open panel's time current, every second, and the brief fresh; call it every pass of the event loop.
 pub fn tick() void {
 
     renew(30 * 60, 10 * 60);
@@ -566,15 +346,13 @@ fn renew(age: u64, gap: u64) void {
 
 }
 
-/// Reads the time and every switch again, lays the month out, and fits the panel to it all.
+/// Reads the time again, lays the month out, and fits the panel to it.
 fn refresh() void {
 
     const today = api.Date.init(api.clock());
 
     due = api.ticks() + 100;
-    hour.content.label = std.fmt.bufPrint(&hour_bytes, "{d}:{d:0>2}", .{ today.twelve(), today.minute }) catch "";
-    half.content.label = today.half();
-    date.content.label = today.long(&date_bytes, true);
+    date.content.label = today.long(&date_bytes, false);
 
     // Past midnight, an open panel still on the old month moves to the new one.
     if (!now.same(Day.today())) {
@@ -586,7 +364,6 @@ fn refresh() void {
 
     fill();
     weather.hidden = brief == null;
-    hear(api.audio.status() catch null);
 
     if (brief) |*known| {
 
@@ -594,38 +371,14 @@ fn refresh() void {
 
         sky_icon.content.label = seen.icon.text();
         degrees.content.label = unit.temperature(&degrees_bytes, known.temperature);
-        sky.content.label = seen.title;
-        place.content.label = api.metrics.text(&known.place);
 
     }
-
-    for (tiles, 0..) |tile, index| {
-
-        const state = tile.read(&detail_bytes[index]);
-        const on = if (state) |known| known.on else false;
-
-        lit[index] = on;
-        rows[index].hidden = state == null;
-        details[index].content.label = if (state) |known| known.detail else "";
-        icons[index].style.background = if (on) theme.accent else theme.hover;
-        icons[index].style.color = if (on) theme.background else theme.text;
-        tracks[index].style.background = if (on) theme.accent else theme.selected;
-        tracks[index].style.justify = if (on) .end else .start;
-        knobs[index].style.background = if (on) theme.background else theme.muted;
-
-    }
-
-    switches.hidden = for (rows) |row| {
-
-        if (!row.hidden) break false;
-
-    } else true;
 
     const size = root.measure();
 
     window.move(.{
 
-        .x = corner.x - gui.px(width),
+        .x = corner.x,
         .y = corner.y,
         .width = gui.px(width),
         .height = size.height,
@@ -714,103 +467,5 @@ fn look(_: *gui.Node) void {
     }
 
     desktop.start_app(.weather, desktop.home);
-
-}
-
-/// Shows the volume as `state` has it, or hides it without audio.
-fn hear(state: ?api.audio.Status) void {
-
-    sound.hidden = state == null;
-
-    const known = state orelse return;
-    const loudness: u8 = if (known.muted) 0 else known.volume;
-
-    level.value = @as(f32, @floatFromInt(known.volume)) / 100;
-    percent.content.label = if (known.muted) "Muted" else std.fmt.bufPrint(&percent_bytes, "{d}%", .{known.volume}) catch "";
-
-    const icon: gui.Icon = if (loudness == 0) .mute else if (loudness < 34) .volume else if (loudness < 67) .volume_low else .volume_high;
-
-    speaker.content.label = icon.text();
-
-}
-
-/// Takes the volume keys, whichever window has the keyboard, playing a tick at the new volume; true when `event` was one.
-pub fn press(event: api.Event) bool {
-
-    if (event.kind != .key or !event.key().global()) return false;
-    if (!event.pressed) return true;
-
-    const state = api.audio.status() catch return true;
-
-    switch (event.key()) {
-
-        .mute => api.audio.mute(!state.muted) catch {
-
-        },
-        .volume_down => api.audio.volume(state.volume -| step) catch {
-
-        },
-        else => api.audio.volume(@min(state.volume + step, 100)) catch {
-
-        },
-
-    }
-
-    api.audio.cue(.level);
-    if (shown()) refresh();
-
-    return true;
-
-}
-
-fn slide(slider: *gui.Slider, done: bool) void {
-
-    api.audio.volume(@intFromFloat(@round(slider.value * 100))) catch {
-
-    };
-
-    if (done) api.audio.cue(.level);
-    hear(api.audio.status() catch null);
-    window.refresh();
-
-}
-
-fn silence(_: *gui.Node) void {
-
-    const state = api.audio.status() catch return;
-
-    api.audio.mute(!state.muted) catch {
-
-    };
-
-    hear(api.audio.status() catch null);
-    window.refresh();
-
-}
-
-fn choose(node: *gui.Node) void {
-
-    tiles[node.data].flip(!lit[node.data]);
-    refresh();
-
-}
-
-fn network(_: []u8) ?State {
-
-    const state = api.net.status() catch return null;
-
-    if (state.off) return .{ .on = false, .detail = "Off" };
-    if (state.speed == 0) return .{ .on = true, .detail = "Disconnected" };
-    if (state.address.empty()) return .{ .on = true, .detail = "Connecting" };
-
-    return .{ .on = true, .detail = "Connected" };
-
-}
-
-fn power(on: bool) void {
-
-    api.net.power(on) catch {
-
-    };
 
 }

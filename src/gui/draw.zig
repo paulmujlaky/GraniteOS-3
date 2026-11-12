@@ -462,6 +462,24 @@ pub const List = struct {
 
 };
 
+/// What the display draws for `theme.accent`, `theme.accent_hover`, and `theme.accent_pressed`, as the user chose.
+pub var accent: [3]u32 = theme.accents[0].shades;
+
+/// `color` with an accent key swapped for the chosen accent, keeping its transparency.
+pub fn recolor(color: u32) u32 {
+
+    const keys = [_]u32{ theme.accent, theme.accent_hover, theme.accent_pressed };
+
+    for (keys, accent) |key, shade| {
+
+        if (color & 0xffffff == key) return color & 0xff000000 | shade;
+
+    }
+
+    return color;
+
+}
+
 /// Reads commands another process wrote, refusing any that are malformed or out of reach.
 pub const Iterator = struct {
 
@@ -494,7 +512,7 @@ pub const Iterator = struct {
                         .clip = clip,
                         .area = rect(shape.area) orelse continue,
 
-                        .color = shape.color,
+                        .color = recolor(shape.color),
                         .radius = std.math.clamp(shape.radius, 0, reach),
 
                     };
@@ -519,7 +537,7 @@ pub const Iterator = struct {
                             .x = run.x,
                             .baseline = run.baseline,
 
-                            .color = run.color,
+                            .color = recolor(run.color),
                             .size = run.size,
                             .face = std.enums.fromInt(font.Face, run.face) orelse continue,
                             .string = body[@sizeOf(Run)..][0..run.length],
@@ -561,7 +579,7 @@ pub const Iterator = struct {
                             .clip = clip,
                             .area = rect(soft.area) orelse continue,
 
-                            .color = soft.color,
+                            .color = recolor(soft.color),
                             .radius = std.math.clamp(soft.radius, 0, reach),
                             .blur = std.math.clamp(soft.blur, 0, canvas.widest),
 
@@ -582,7 +600,7 @@ pub const Iterator = struct {
 
                             .clip = clip,
                             .form = sketch.Form.read(mark.shape, mark.values) orelse continue,
-                            .color = mark.color,
+                            .color = recolor(mark.color),
 
                         },
 
@@ -609,14 +627,14 @@ pub const Iterator = struct {
                             .points = points,
 
                             .width = trace.width,
-                            .color = trace.color,
+                            .color = recolor(trace.color),
 
                             .under = if (trace.under[0] >> 24 == 0xff and trace.under[1] >> 24 == 0xff) null else .{
 
                                 .floor = trace.floor,
                                 .ceiling = trace.ceiling,
 
-                                .colors = trace.under,
+                                .colors = .{ recolor(trace.under[0]), recolor(trace.under[1]) },
                                 .radius = trace.radius,
 
                             },

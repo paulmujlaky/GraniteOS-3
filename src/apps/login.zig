@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const controls = @import("controls.zig");
+const status = @import("status.zig");
 const desktop = @import("desktop.zig");
 
 const api = @import("api");
@@ -271,7 +271,7 @@ pub export fn app_main(_: usize, _: usize, environment: *const api.abi.Environme
 
         if (gui.wait(all[0 .. surfaces.len + 1], desktop.patience(50))) |input| {
 
-            if (!controls.press(input.event) and !desktop.react(input)) react(input.event);
+            if (!status.press(input.event) and !desktop.react(input)) react(input.event);
 
         }
 

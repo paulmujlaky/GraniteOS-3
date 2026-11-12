@@ -71,6 +71,7 @@ pub const Operation = enum(u8) {
     locate,
     scale,
     chime,
+    accent,
     _,
 
 };

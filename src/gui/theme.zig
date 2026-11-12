@@ -1,5 +1,7 @@
 //! The flat monochrome look shared by every surface: graphite surfaces, white text, and light grey for focus and selection.
 
+const std = @import("std");
+
 const style = @import("style.zig");
 
 const Style = style.Style;
@@ -13,14 +15,54 @@ pub const raised = 0x1b1b1b;
 pub const field = 0x232323;
 pub const hover = 0x2a2a2a;
 pub const selected = 0x333333;
+
+/// Behind a focused field or button, a step brighter than `hover`.
+pub const lit = 0x2f2f2f;
 pub const line = 0x2c2c2c;
+
+/// Borders of fields and buttons, a step lighter than `line` so they read against `field`.
+pub const edge = 0x383838;
 
 pub const text = 0xe8e8e8;
 pub const muted = 0x8c8c8c;
 pub const faint = 0x5a5a5a;
 
-/// Focus rings, primary actions, and active indicators.
+/// Focus rings, primary actions, and active indicators. These are keys the display swaps for the user's chosen accent as it draws.
 pub const accent = 0xeeeeee;
+pub const accent_hover = 0xfdfdfd;
+pub const accent_pressed = 0xcbcbcb;
+
+/// An accent people may pick in Settings, as the colours that replace `accent`, `accent_hover`, and `accent_pressed`.
+pub const Accent = struct {
+
+    name: []const u8,
+    shades: [3]u32,
+
+};
+
+/// The first is the default.
+pub const accents = [_]Accent{
+
+    .{ .name = "White", .shades = .{ 0xeeeeee, 0xffffff, 0xcccccc } },
+    .{ .name = "Blue", .shades = .{ 0x5b9cff, 0x7cb0ff, 0x4a84db } },
+    .{ .name = "Teal", .shades = .{ 0x3fc1ae, 0x5fd0bf, 0x34a294 } },
+    .{ .name = "Amber", .shades = .{ 0xe6a94a, 0xefbd6c, 0xc58f3c } },
+    .{ .name = "Violet", .shades = .{ 0xa58bff, 0xb9a4ff, 0x8a72dd } },
+
+};
+
+/// The index of the accent called `name`, or the default's.
+pub fn accentNamed(name: []const u8) u8 {
+
+    for (accents, 0..) |entry, index| {
+
+        if (std.ascii.eqlIgnoreCase(entry.name, name)) return @intCast(index);
+
+    }
+
+    return 0;
+
+}
 pub const danger = 0xe5534b;
 
 /// Code and Markdown colours, the one place the look strays from grey: soft hues about as light as the text, so highlighting
@@ -53,10 +95,11 @@ pub const pane = 0xf7ffffff;
 /// An area swept out with the pointer, as when selecting: a faint white fill inside a lighter, softly rounded edge.
 pub const sweep_fill = 0xe6ffffff;
 pub const sweep_edge = 0x73ffffff;
-pub const sweep_radius = 4;
+pub const sweep_radius = radius;
 
-pub const radius = 6;
-pub const corner = 10;
+/// Corners of everything rounded that is not a circle: controls, cards, pop-ups, and windows.
+pub const radius = 12;
+pub const corner = radius;
 pub const border = 1;
 pub const spacing = 12;
 pub const gap = 8;
@@ -89,7 +132,7 @@ pub const button = Style{
     .padding = .axes(0, 14),
 
     .background = field,
-    .border = line,
+    .border = edge,
     .border_width = border,
     .radius = radius,
     .text_align = .center,
@@ -101,7 +144,7 @@ pub const button = Style{
     },
     .focus = .{
 
-        .border = accent,
+        .background = lit,
 
     },
     .pressed = .{
@@ -127,19 +170,20 @@ pub const primary = button.with(.{
 
     .hover = .{
 
-        .background = 0xffffff,
-        .border = 0xffffff,
+        .background = accent_hover,
+        .border = accent_hover,
 
     },
     .focus = .{
 
-        .border = 0xffffff,
+        .background = accent_hover,
+        .border = accent_hover,
 
     },
     .pressed = .{
 
-        .background = 0xcccccc,
-        .border = 0xcccccc,
+        .background = accent_pressed,
+        .border = accent_pressed,
 
     },
 
@@ -160,7 +204,8 @@ pub const destructive = button.with(.{
     },
     .focus = .{
 
-        .border = 0xffffff,
+        .background = 0xf06a62,
+        .border = 0xf06a62,
 
     },
     .pressed = .{
@@ -238,13 +283,13 @@ pub const input = Style{
     .padding = .axes(0, 10),
 
     .background = field,
-    .border = line,
+    .border = edge,
     .border_width = border,
     .radius = radius,
 
     .focus = .{
 
-        .border = accent,
+        .background = lit,
 
     },
     .invalid = .{

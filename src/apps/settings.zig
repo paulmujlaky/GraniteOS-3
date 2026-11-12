@@ -1,9 +1,9 @@
-//! Settings: the display mode, the wallpaper and Quartz, the network, sound, and accounts.
+//! Settings: the display mode, the wallpaper, accent, and Quartz, the network, sound, and accounts.
 
 const std = @import("std");
 
 const catalog = @import("catalog.zig");
-const granite = @import("granite.zig");
+const wallpapers = @import("wallpapers.zig");
 
 const api = @import("api");
 const gui = @import("gui");
@@ -70,6 +70,34 @@ const scale_choices = blk: {
         };
 
     }
+
+    break :blk choices;
+
+};
+
+const wallpaper_choices = blk: {
+
+    var choices: [wallpapers.all.len + 1]gui.Choice = undefined;
+
+    for (wallpapers.all, 0..) |entry, index| {
+
+        choices[index] = .{
+
+            .icon = .wallpaper,
+            .title = entry.name,
+            .run = chooseWallpaper(index),
+
+        };
+
+    }
+
+    choices[wallpapers.all.len] = .{
+
+        .icon = .image,
+        .title = "Picture",
+        .run = pickPicture,
+
+    };
 
     break :blk choices;
 
@@ -169,7 +197,8 @@ const segment = gui.Style{
 
     .padding = .axes(0, 14),
 
-    .radius = theme.radius - 2,
+    // Concentric with the track, inset by its padding.
+    .radius = theme.radius - 3,
     .size = theme.small,
     .text_align = .center,
 
@@ -228,6 +257,20 @@ fn chooseMode(comptime index: usize) *const fn () void {
         fn run() void {
 
             setMode(index);
+
+        }
+
+    }.run;
+
+}
+
+fn chooseWallpaper(comptime index: usize) *const fn () void {
+
+    return struct {
+
+        fn run() void {
+
+            useWallpaper(index);
 
         }
 
@@ -388,6 +431,93 @@ const Switch = struct {
 
 };
 
+/// A row of round accent colours; the chosen one is ringed.
+const Swatches = struct {
+
+    dots: [theme.accents.len]gui.Node = undefined,
+    dot_parts: [theme.accents.len][1]*gui.Node = undefined,
+    rings: [theme.accents.len]gui.Node = undefined,
+    ring_parts: [theme.accents.len]*gui.Node = undefined,
+    node: gui.Node = undefined,
+
+    fn init(self: *Swatches) void {
+
+        inline for (theme.accents, 0..) |entry, index| {
+
+            // One shade off the key, so the display shows each swatch's own colour rather than the chosen accent.
+            self.dots[index] = gui.box(.{
+
+                .width = 18,
+                .height = 18,
+
+                .background = entry.shades[0] ^ 1,
+                .radius = 9,
+
+            }, &.{});
+
+            self.dot_parts[index] = .{&self.dots[index]};
+
+            self.rings[index] = gui.box(.{
+
+                .width = 28,
+                .height = 28,
+                .padding = .all(5),
+
+                .border_width = 2,
+                .radius = 14,
+
+                .hover = .{
+
+                    .border = theme.faint,
+
+                },
+                .focus = .{
+
+                    .border = theme.muted,
+
+                },
+                .selected = .{
+
+                    .border = theme.text,
+
+                },
+
+            }, &self.dot_parts[index]);
+
+            self.rings[index].action = &struct {
+
+                fn run(_: *gui.Node) void {
+
+                    pickAccent(index);
+
+                }
+
+            }.run;
+
+            self.ring_parts[index] = &self.rings[index];
+
+        }
+
+        self.node = gui.box(.{
+
+            .direction = .row,
+            .gap = 4,
+            .items = .center,
+
+        }, &self.ring_parts);
+
+    }
+
+    fn set(self: *Swatches, chosen: u8) void {
+
+        for (&self.rings, 0..) |*ring, index| ring.selected = index == chosen;
+
+        window.refresh();
+
+    }
+
+};
+
 /// A small monitor on its stand, showing the wallpaper under a sketch of the desktop in the screen's shape.
 const Monitor = struct {
 
@@ -441,7 +571,7 @@ const Monitor = struct {
             .background = theme.desktop,
             .border = theme.line,
             .border_width = theme.border,
-            .radius = 8,
+            .radius = theme.radius,
 
         }, &self.bezel_parts);
 
@@ -591,12 +721,7 @@ var appearance_hero = gui.box(card.with(.{
 var wallpaper = Picker{};
 var wallpaper_row = Row{};
 
-var wallpaper_menu: gui.Menu(&.{
-
-    .{ .icon = .wallpaper, .title = "Granite", .run = useGranite },
-    .{ .icon = .image, .title = "Picture", .run = pickPicture },
-
-}) = .{};
+var wallpaper_menu: gui.Menu(&wallpaper_choices) = .{};
 
 var picture_bytes: [256]u8 = undefined;
 
@@ -620,7 +745,9 @@ var picture_row = gui.box(line.with(.{
 var quartz = Switch{};
 var quartz_on = false;
 var quartz_row = Row{};
-var appearance_rows = [_]*gui.Node{ &wallpaper_row.node, &picture_row, &quartz_row.node };
+var swatches = Swatches{};
+var accent_row = Row{};
+var appearance_rows = [_]*gui.Node{ &wallpaper_row.node, &picture_row, &accent_row.node, &quartz_row.node };
 var appearance_group = gui.box(group, &appearance_rows);
 var appearance_status = quiet();
 var appearance_parts = [_]*gui.Node{ &appearance_title, &appearance_hero, &appearance_group, &appearance_status };
@@ -1050,6 +1177,9 @@ fn buildAppearance() void {
     picture_field.style.grow = 1;
     picture_apply.style = theme.primary;
 
+    swatches.init();
+    accent_row.init(.palette, "Accent colour", &swatches.node);
+
     quartz.init();
     quartz_row.init(.brush, "Transparency effects", &quartz.node);
     quartz_row.node.style.hover.background = theme.hover;
@@ -1274,7 +1404,11 @@ fn describePreview() void {
     var arena = std.heap.ArenaAllocator.init(api.pages);
     defer arena.deinit();
 
-    var next = decode(arena.allocator(), path) catch granite.preview(arena.allocator()) catch return;
+    const tall: u32 = @intCast(gui.px(preview_height));
+    const wide: u32 = @intCast(@max(@divTrunc(@as(i64, tall) * size.width, size.height), 1));
+    const built_in = wallpapers.find(path) orelse 0;
+
+    var next = decode(arena.allocator(), path) catch wallpapers.render(built_in, wide, tall) catch return;
 
     next.fit = .cover;
 
@@ -1433,10 +1567,12 @@ fn describeAppearance() void {
     preferences.open(user, "desktop");
 
     const current = preferences.get("wallpaper") orelse "";
+    const picture = current.len != 0 and wallpapers.find(current) == null;
 
-    if (current.len != 0) picture_text.set(current);
+    if (picture) picture_text.set(current);
 
-    choosePicture(current.len != 0);
+    choosePicture(if (picture) null else wallpapers.find(current) orelse 0);
+    swatches.set(theme.accentNamed(preferences.get("accent") orelse ""));
     quartz_on = !std.mem.eql(u8, preferences.get("quartz") orelse "", "off");
     quartz.set(quartz_on);
     describePreview();
@@ -1444,11 +1580,11 @@ fn describeAppearance() void {
 
 }
 
-/// Shows Picture, rather than Granite, as the wallpaper, with a field for its path.
-fn choosePicture(chosen: bool) void {
+/// Shows built-in wallpaper `which` as chosen, or Picture, with a field for its path, when null.
+fn choosePicture(which: ?usize) void {
 
-    wallpaper.value.content.label = if (chosen) "Picture" else "Granite";
-    picture_row.hidden = !chosen;
+    wallpaper.value.content.label = if (which) |index| wallpapers.all[index].name else "Picture";
+    picture_row.hidden = which != null;
     window.refresh();
 
 }
@@ -1502,19 +1638,28 @@ fn toggleQuartz(_: *gui.Node) void {
 
 }
 
-fn useGranite() void {
+fn useWallpaper(index: usize) void {
 
-    if (!prefer("wallpaper", "", .all)) return;
+    if (!prefer("wallpaper", wallpapers.all[index].name, .all)) return;
 
-    choosePicture(false);
+    choosePicture(index);
     describePreview();
+    tell(&appearance_status, "");
+
+}
+
+fn pickAccent(index: u8) void {
+
+    if (!prefer("accent", theme.accents[index].name, .accent)) return;
+
+    swatches.set(index);
     tell(&appearance_status, "");
 
 }
 
 fn pickPicture() void {
 
-    choosePicture(true);
+    choosePicture(null);
     window.focus(&picture_field);
 
 }

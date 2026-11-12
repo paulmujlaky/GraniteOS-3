@@ -1,5 +1,5 @@
-//! The app launcher: a search field over the categories down the side and the apps of the one picked, or over every app
-//! the search matches.
+//! The app launcher, opened from the dock: a search field over category chips and a grid of the apps the search or the
+//! picked category shows.
 
 const std = @import("std");
 
@@ -15,7 +15,7 @@ const Category = catalog.Category;
 
 const categories = std.enums.values(Category);
 
-/// Rows down the side: every app, then each category.
+/// Chips along the top: every app, then each category.
 const sections = categories.len + 1;
 
 var search_bytes: [64]u8 = undefined;
@@ -28,47 +28,133 @@ var search_text = gui.Text{
 };
 
 var search = gui.input(&search_text);
+
+var magnifier = gui.icon(.search, theme.icon.with(.{
+
+    .color = theme.muted,
+
+}));
+
+var magnifier_parts = [_]*gui.Node{&magnifier};
+
+/// The magnifier, laid over the field's left end; it takes no clicks, so they reach the field beneath.
+var magnifier_row = gui.box(.{
+
+    .padding = .{
+
+        .left = 10,
+
+    },
+    .direction = .row,
+    .items = .center,
+
+}, &magnifier_parts);
+
+var search_parts = [_]*gui.Node{ &search, &magnifier_row };
+
+var search_box = gui.box(.{
+
+    .height = theme.control,
+    .direction = .stack,
+
+}, &search_parts);
 var searched: u64 = 0;
 
 /// The category picked, or null for every app.
 var picked: ?Category = null;
 
-var section_icons: [sections]gui.Node = undefined;
-var section_titles: [sections]gui.Node = undefined;
-var section_parts: [sections][2]*gui.Node = undefined;
-var section_rows: [sections]gui.Node = undefined;
-var section_list: [sections]*gui.Node = undefined;
+/// A category's chip under the search, filled while picked.
+const chip = gui.Style{
 
-var side = gui.box(.{
+    .height = 28,
+    .padding = .axes(0, 12),
 
-    .width = 160,
-    .gap = 2,
+    .radius = 14,
+    .size = theme.small,
+    .color = theme.muted,
+    .text_align = .center,
 
-}, &section_list);
+    .hover = .{
 
-var rule = gui.box(.{
+        .background = theme.hover,
+        .color = theme.text,
 
-    .width = theme.border,
-    .background = theme.line,
+    },
+    .focus = .{
 
-}, &.{});
+        .background = theme.hover,
 
-var entries: [catalog.apps.len]gui.Node = undefined;
-var entry_icons: [catalog.apps.len]gui.Node = undefined;
-var entry_titles: [catalog.apps.len]gui.Node = undefined;
-var entry_summaries: [catalog.apps.len]gui.Node = undefined;
-var entry_texts: [catalog.apps.len]gui.Node = undefined;
-var entry_text_parts: [catalog.apps.len][2]*gui.Node = undefined;
-var entry_parts: [catalog.apps.len][2]*gui.Node = undefined;
-var list_parts: [catalog.apps.len]*gui.Node = undefined;
+    },
+    .selected = .{
 
-var list = gui.box(.{
+        .background = theme.selected,
+        .color = theme.text,
+
+    },
+
+};
+
+/// An app's tile: its icon over its name.
+const tile = gui.Style{
+
+    .width = 104,
+    .height = 88,
+    .direction = .column,
+    .gap = 6,
+    .justify = .center,
+    .items = .center,
+
+    .radius = theme.radius,
+
+    .hover = .{
+
+        .background = theme.hover,
+
+    },
+    .focus = .{
+
+        .background = theme.hover,
+
+    },
+    .pressed = .{
+
+        .background = theme.selected,
+
+    },
+
+};
+
+const columns = 5;
+const lines = (catalog.apps.len + columns - 1) / columns;
+
+var chips: [sections]gui.Node = undefined;
+var chip_list: [sections]*gui.Node = undefined;
+
+var chip_row = gui.box(.{
+
+    .direction = .row,
+    .gap = 4,
+    .justify = .center,
+
+}, &chip_list);
+
+var tiles: [catalog.apps.len]gui.Node = undefined;
+var tile_icons: [catalog.apps.len]gui.Node = undefined;
+var tile_titles: [catalog.apps.len]gui.Node = undefined;
+var tile_parts: [catalog.apps.len][2]*gui.Node = undefined;
+
+/// The tiles the search or category shows, packed in order and cut into rows.
+var shown_tiles: [catalog.apps.len]*gui.Node = undefined;
+var rows: [lines]gui.Node = undefined;
+var row_list: [lines]*gui.Node = undefined;
+
+var grid = gui.box(.{
 
     .grow = 1,
-    .gap = 2,
+    .gap = 4,
     .scroll = true,
 
-}, &list_parts);
+}, &row_list);
 
 var none = gui.label("No apps match.", theme.caption.with(.{
 
@@ -77,25 +163,7 @@ var none = gui.label("No apps match.", theme.caption.with(.{
 
 }));
 
-var main_parts = [_]*gui.Node{ &list, &none };
-
-var main = gui.box(.{
-
-    .grow = 1,
-
-}, &main_parts);
-
-var body_parts = [_]*gui.Node{ &side, &rule, &main };
-
-var body = gui.box(.{
-
-    .grow = 1,
-    .direction = .row,
-    .gap = 10,
-
-}, &body_parts);
-
-var root_parts = [_]*gui.Node{ &search, &body };
+var root_parts = [_]*gui.Node{ &search_box, &chip_row, &grid, &none };
 
 var root = gui.box(theme.popup.with(.{
 
@@ -106,96 +174,103 @@ var root = gui.box(theme.popup.with(.{
 
 pub var window: gui.Window = undefined;
 
-/// The launcher's size at 100%.
-const width = 620;
-const height = 440;
+/// The launcher's size at 100%: five tiles across and three down.
+pub const width = columns * 104 + (columns - 1) * 4 + 2 * theme.spacing;
+pub const height = 380;
 
-/// Opens the launcher, hidden, with its top-left corner at `at`.
-pub fn init(at: gui.Point) void {
+/// Opens the launcher, hidden, at `area`; see `place`.
+pub fn init(area: gui.Rect) void {
 
     for (0..sections) |index| {
 
         const category: ?Category = if (index == 0) null else categories[index - 1];
 
-        section_icons[index] = gui.icon(if (category) |which| which.icon() else .grid, theme.icon);
-        section_titles[index] = gui.label(if (category) |which| which.title() else "All apps", .{});
-        section_parts[index] = .{ &section_icons[index], &section_titles[index] };
-        section_rows[index] = gui.box(theme.item, &section_parts[index]);
-        section_rows[index].action = &choose;
-        section_rows[index].data = index;
-        section_list[index] = &section_rows[index];
+        chips[index] = gui.label(if (category) |which| which.title() else "All", chip);
+        chips[index].action = &choose;
+        chips[index].data = index;
+        chip_list[index] = &chips[index];
 
     }
 
     for (catalog.apps, 0..) |app, index| {
 
-        entry_icons[index] = gui.icon(app.icon, theme.icon.with(.{
+        tile_icons[index] = gui.icon(app.icon, theme.icon.with(.{
 
-            .width = 32,
-            .size = 22,
+            .width = 40,
+            .height = 32,
+            .size = 26,
 
         }));
 
-        entry_titles[index] = gui.label(app.title, .{});
-        entry_summaries[index] = gui.label(app.summary, theme.caption);
-        entry_text_parts[index] = .{ &entry_titles[index], &entry_summaries[index] };
+        tile_titles[index] = gui.label(app.title, .{
 
-        entry_texts[index] = gui.box(.{
+            .size = theme.small,
+            .text_align = .center,
 
-            .gap = 2,
-            .justify = .center,
+        });
 
-        }, &entry_text_parts[index]);
+        tile_parts[index] = .{ &tile_icons[index], &tile_titles[index] };
+        tiles[index] = gui.box(tile, &tile_parts[index]);
+        tiles[index].action = &open;
+        tiles[index].menu = &offer;
+        tiles[index].data = index;
 
-        entry_parts[index] = .{ &entry_icons[index], &entry_texts[index] };
+    }
 
-        entries[index] = gui.box(theme.item.with(.{
+    for (&rows, 0..) |*row, index| {
 
-            .height = 54,
+        row.* = gui.box(.{
 
-        }), &entry_parts[index]);
+            .direction = .row,
+            .gap = 4,
 
-        entries[index].action = &open;
-        entries[index].menu = &offer;
-        entries[index].data = index;
-        list_parts[index] = &entries[index];
+        }, &.{});
+
+        row_list[index] = row;
 
     }
 
     search.action = &first;
+    search.style.padding.left = 36;
 
     window = gui.Window.open(&root, .{
 
         .layer = .panel,
 
-        .x = at.x,
-        .y = at.y,
-        .width = gui.px(width),
-        .height = gui.px(height),
+        .x = area.x,
+        .y = area.y,
+        .width = area.width,
+        .height = area.height,
 
         .hidden = true,
-        .motion = .drop,
+        .motion = .rise,
         .shadow = true,
 
     }) catch api.exit(3);
 
 }
 
-/// Puts the launcher's top-left corner at `at`, sized for the interface scale.
-pub fn place(at: gui.Point) void {
+/// Where the launcher goes on a `screen`-sized display: centred, just above a dock reaching `reach` up from the bottom.
+pub fn spot(screen: gui.Rect, reach: i32) gui.Rect {
 
-    window.move(.{
+    return .{
 
-        .x = at.x,
-        .y = at.y,
+        .x = @divTrunc(screen.width - gui.px(width), 2),
+        .y = screen.height - reach - gui.px(height),
         .width = gui.px(width),
         .height = gui.px(height),
 
-    });
+    };
 
 }
 
-/// Keeps the list to what the search matches; call it every pass of the event loop.
+pub fn place(area: gui.Rect) void {
+
+    window.move(area);
+
+}
+
+/// Keeps the grid to what the search matches; call it every pass of the event loop.
 pub fn tick() void {
 
     // The search field takes its own keys, so a changed text is how typing shows.
@@ -229,31 +304,42 @@ pub fn shown() bool {
 fn filter() void {
 
     const query = search_text.text();
-    const current: usize = if (picked) |which| @intFromEnum(which) + 1 else 0;
+    // Widened first: the enum's own integer is only as wide as its last value needs.
+    const current: usize = if (picked) |which| @as(usize, @intFromEnum(which)) + 1 else 0;
+    var count: usize = 0;
 
     searched = search_text.version;
 
     for (catalog.apps, 0..) |app, index| {
 
-        entries[index].hidden = if (query.len != 0) std.ascii.indexOfIgnoreCase(app.title, query) == null and std.ascii.indexOfIgnoreCase(app.summary, query) == null else picked != null and picked != app.category;
+        const hidden = if (query.len != 0) std.ascii.indexOfIgnoreCase(app.title, query) == null and std.ascii.indexOfIgnoreCase(app.summary, query) == null else picked != null and picked != app.category;
+
+        if (hidden) continue;
+
+        shown_tiles[count] = &tiles[index];
+        count += 1;
+
+    }
+
+    for (&rows, 0..) |*row, line| {
+
+        const from = @min(line * columns, count);
+
+        row.content.box = shown_tiles[from..@min(from + columns, count)];
+        row.hidden = from == count;
 
     }
 
     // A search spans every category, so none shows as picked meanwhile.
-    for (&section_rows, 0..) |*row, index| {
+    for (&chips, 0..) |*item, index| {
 
-        row.selected = query.len == 0 and index == current;
+        item.selected = query.len == 0 and index == current;
 
     }
 
-    list.hidden = for (entries) |entry| {
-
-        if (!entry.hidden) break false;
-
-    } else true;
-
-    none.hidden = !list.hidden;
-    list.offset = 0;
+    grid.hidden = count == 0;
+    none.hidden = count != 0;
+    grid.offset = 0;
     window.refresh();
 
 }
@@ -272,14 +358,10 @@ fn open(node: *gui.Node) void {
 
 }
 
-/// Launches the first app the list shows.
+/// Launches the first app the grid shows.
 fn first(_: *gui.Node) void {
 
-    for (&entries) |*entry| {
-
-        if (!entry.hidden) return open(entry);
-
-    }
+    if (!grid.hidden) open(rows[0].content.box[0]);
 
 }
 

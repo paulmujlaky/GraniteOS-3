@@ -867,6 +867,7 @@ fn respond(request: api.Request) ?u64 {
         .capture => snapshot(request),
         .cursor => pointing(request, value),
         .quartz => quartz(request, value),
+        .accent => accent(request, value),
         .scale => rescale(value),
         .crash => if (request.first == api.raw(.owner, 0, 0, 0).first) fault() else protocol.invalid,
         else => protocol.invalid,
@@ -1184,6 +1185,23 @@ fn quartz(request: api.Request, value: u64) u64 {
 
     translucent = value == 1;
     frost();
+    compose(back.bounds());
+
+    return 0;
+
+}
+
+/// Session only: draws the accent as `gui.theme.accents[value]`, as its user chose.
+fn accent(request: api.Request, value: u64) u64 {
+
+    if (request.first != session()) return protocol.denied;
+    if (value >= gui.theme.accents.len) return protocol.invalid;
+
+    const shades = gui.theme.accents[value].shades;
+
+    if (std.mem.eql(u32, &gui.draw.accent, &shades)) return 0;
+
+    gui.draw.accent = shades;
     compose(back.bounds());
 
     return 0;

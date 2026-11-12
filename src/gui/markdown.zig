@@ -1340,7 +1340,7 @@ pub const Preview = struct {
         var spans: [128]syntax.Span = undefined;
         var top = y + padding;
 
-        try self.add(.{ .kind = .fill, .area = box, .color = theme.raised, .radius = style.px(6) });
+        try self.add(.{ .kind = .fill, .area = box, .color = theme.raised, .radius = style.px(theme.radius) });
 
         while (lines.next()) |line| : (top += height) {
 
