@@ -15,7 +15,7 @@ fail() {
 
 usage='Usage: sh tools/qemu.sh show|stop [--name NAME] [--media usb|disk|none] [--data blank|foreign|keep] [--cpus N]
     [--memory MB] [--disk nvme|sata] [--input usb|hub|ps2] [--timers off|on] [--serial off|file] [--apic xapic|x2apic|legacy]
-    [--vnc PORT] [--accel kvm|tcg] [--screen WIDTHxHEIGHT]'
+    [--vnc PORT] [--accel kvm|tcg] [--screen WIDTHxHEIGHT] [--spare GB]'
 [ "$#" -ge 1 ] || fail "$usage"
 
 action=$1
@@ -33,6 +33,7 @@ serial=off
 apic=xapic
 vnc=5903
 accel=kvm
+spare=0
 screen=1920x1080
 
 while [ "$#" -gt 0 ]; do
@@ -53,6 +54,7 @@ while [ "$#" -gt 0 ]; do
         --vnc) vnc=$2 ;;
         --accel) accel=$2 ;;
         --screen) screen=$2 ;;
+        --spare) spare=$2 ;;
         *) fail "$usage" ;;
     esac
 
@@ -70,7 +72,7 @@ case $media-$data-$disk-$input-$timers-$serial-$apic-$accel in
     *) fail "$usage" ;;
 esac
 
-case $name-$cpus-$memory-$vnc-$screen in
+case $name-$cpus-$memory-$vnc-$screen-$spare in
     *[!a-z0-9x-]*) fail "$usage" ;;
 esac
 
@@ -195,6 +197,15 @@ case $media in
     disk) storage=$(attach boot.img 0; attach data.img 1) ;;
     none) storage=$(attach data.img 0) ;;
 esac
+
+# A second, empty disk, as a spare drive to give GraniteOS whole; `keep` leaves an existing one as it is.
+if [ "$spare" != 0 ]; then
+
+    [ "$data" = keep ] && [ -f "$directory/spare.img" ] || { rm -f "$directory/spare.img"; inside truncate -s "${spare}G" "$guest/spare.img"; }
+    storage="$storage
+$(attach spare.img 2)"
+
+fi
 
 # Each argument is one line, and none holds a space.
 # shellcheck disable=SC2086

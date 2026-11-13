@@ -12,6 +12,13 @@ pub const esp = [16]u8{
 
 };
 
+/// Microsoft reserved partition e3c9e316-0b5c-4db8-817d-f92df00215ae, which Windows adds to disks and which holds no files.
+pub const reserved = [16]u8{
+
+    0x16, 0xe3, 0xc9, 0xe3, 0x5c, 0x0b, 0xb8, 0x4d, 0x81, 0x7d, 0xf9, 0x2d, 0xf0, 0x02, 0x15, 0xae,
+
+};
+
 const alignment = 2048;
 const limit = 128 * 128;
 
@@ -54,6 +61,57 @@ pub const Table = struct {
         try disk.read(field(u64, &self.header, 72), self.entries[0..bytes]);
 
         return Crc32.hash(self.entries[0 .. count * width]) == field(u32, &self.header, 88);
+
+    }
+
+    /// Starts an empty table for a disk of `capacity` sectors behind a protective MBR; `add` writes both copies out.
+    pub fn create(self: *Table, disk: anytype, capacity: u64, unique: [16]u8) !void {
+
+        var mbr = std.mem.zeroes([512]u8);
+
+        mbr[446 + 2] = 2;
+        mbr[446 + 4] = 0xee;
+        @memset(mbr[446 + 5 .. 446 + 8], 0xff);
+        std.mem.writeInt(u32, mbr[446 + 8 ..][0..4], 1, .little);
+        std.mem.writeInt(u32, mbr[446 + 12 ..][0..4], @intCast(@min(capacity - 1, 0xffffffff)), .little);
+        mbr[510] = 0x55;
+        mbr[511] = 0xaa;
+
+        @memset(&self.header, 0);
+        @memset(&self.entries, 0);
+
+        self.header[0..8].* = "EFI PART".*;
+        std.mem.writeInt(u32, self.header[8..12], 0x10000, .little);
+        std.mem.writeInt(u32, self.header[12..16], 92, .little);
+        std.mem.writeInt(u64, self.header[24..32], 1, .little);
+        std.mem.writeInt(u64, self.header[32..40], capacity - 1, .little);
+        std.mem.writeInt(u64, self.header[40..48], 34, .little);
+        std.mem.writeInt(u64, self.header[48..56], capacity - 34, .little);
+        self.header[56..72].* = unique;
+        std.mem.writeInt(u64, self.header[72..80], 2, .little);
+        std.mem.writeInt(u32, self.header[80..84], 128, .little);
+        std.mem.writeInt(u32, self.header[84..88], 128, .little);
+
+        try disk.write(0, &mbr);
+
+    }
+
+    /// Every partition is one of `kinds`, as on a disk nothing but GraniteOS uses.
+    pub fn only(self: *const Table, kinds: []const [16]u8) bool {
+
+        for (0..field(u32, &self.header, 80)) |index| {
+
+            if (!self.used(index)) continue;
+
+            for (kinds) |kind| {
+
+                if (std.mem.eql(u8, self.record(index)[0..16], &kind)) break;
+
+            } else return false;
+
+        }
+
+        return true;
 
     }
 

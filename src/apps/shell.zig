@@ -84,7 +84,8 @@ const groups = [_]Group{
             command("ps", "List processes with their memory and processor use", ps),
             command("log", "Show the kernel and service log (administrators)", log),
             command("display [WIDTHxHEIGHT]", "Show or set the screen mode (administrators)", display),
-            command("install", "Install GraniteOS beside the existing OS", install),
+            command("disks", "List disks and where GraniteOS can be installed", disks),
+            command("install [DISK [beside|erase]]", "Install GraniteOS beside the existing OS, or on an empty disk", install),
             command("reboot", "Restart the machine", reboot),
             command("shutdown", "Power off the machine", shutdown),
 
@@ -819,18 +820,52 @@ fn display(argument: []const u8) Error!void {
 
 }
 
-fn install(_: []const u8) Error!void {
+fn disks(_: []const u8) Error!void {
+
+    const installer = api.lookup(terminal.supervisor, .install) catch return terminal.write("disks: installer unavailable\n");
+    var index: u8 = 0;
+
+    while (index < 32) : (index += 1) {
+
+        var survey = protocol.Survey{};
+        const result = api.exchange(installer, protocol.pack(.list, index), std.mem.asBytes(&survey)) catch return terminal.write("disks: installer disconnected\n");
+
+        if (result != 0) break;
+
+        try terminal.print("{d}  {d} MiB  {s}{s}\n", .{ index, survey.sectors / 2048, switch (survey.placement) {
+
+            .unreadable => "unreadable",
+            .empty => "empty: install with 'install N erase'",
+            .granite => "GraniteOS only: install again with 'install N erase'",
+            .beside => "room beside the existing system: 'install N beside'",
+            .full => "used by another system, with no room",
+
+        }, if (survey.windows) " (Windows)" else "" });
+
+    }
+
+}
+
+fn install(argument: []const u8) Error!void {
 
     const installer = api.lookup(terminal.supervisor, .install) catch return terminal.write("install: installer unavailable\n");
 
-    try terminal.write("install: copying GraniteOS beside the existing OS\n");
+    // No argument takes the first disk with room beside another system; DISK [beside|erase] names one.
+    var words = std.mem.tokenizeScalar(u8, argument, ' ');
+    const index = if (words.next()) |word| std.fmt.parseInt(u8, word, 10) catch return terminal.write("usage: install [DISK [beside|erase]]\n") else null;
+    const how = words.next() orelse "beside";
+    const placing: protocol.Mode = if (index == null) .first else if (std.mem.eql(u8, how, "erase")) .erase else if (std.mem.eql(u8, how, "beside")) .beside else return terminal.write("usage: install [DISK [beside|erase]]\n");
 
-    const result = (api.checked(api.raw(.call, installer, protocol.pack(.install, 0), 6000)) catch return terminal.write("install: installer disconnected\n")).first;
+    try terminal.write(if (placing == .erase) "install: erasing the disk for GraniteOS\n" else "install: copying GraniteOS beside the existing OS\n");
+
+    const value = @as(u56, index orelse 0) | @as(u56, @intFromEnum(placing)) << 8;
+    const result = (api.checked(api.raw(.call, installer, protocol.pack(.install, value), 6000)) catch return terminal.write("install: installer disconnected\n")).first;
 
     try terminal.write(switch (result) {
 
         protocol.denied => "install: administrators only\n",
-        protocol.missing => "install: no GPT disk with an EFI system partition and 64 MiB free\n",
+        protocol.busy => "install: that disk holds another system; only empty or GraniteOS disks are erased\n",
+        protocol.missing => "install: no room; see 'disks' for where GraniteOS can go\n",
         protocol.empty => "install: the boot file is unavailable on this media\n",
         protocol.invalid => "install: failed\n",
         else => return terminal.print("install: installed to disk {d}; boot entry Boot{X:0>4}\n", .{ result & 0xff, result >> 8 }),

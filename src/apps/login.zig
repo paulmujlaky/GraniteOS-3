@@ -56,6 +56,17 @@ var bare = false;
 var notice: []const u8 = "";
 var installed = false;
 
+/// The disks the installer reported, the one picked, and whether erasing it was asked for once already.
+var surveys: [6]protocol.Survey = undefined;
+var drives: usize = 0;
+var target: usize = 0;
+var armed = false;
+
+var disk_labels: [6][96]u8 = undefined;
+var disk_rows: [6]gui.Node = undefined;
+var disk_list: [6]*gui.Node = undefined;
+var button_label: [64]u8 = undefined;
+
 var names: [8][32]u8 = undefined;
 var lengths: [8]usize = undefined;
 var initials: [8]u8 = undefined;
@@ -174,9 +185,21 @@ var hint = gui.label("", theme.caption.with(.{
 
 }));
 
-var installer = gui.button("Install GraniteOS", &install);
+var installer = gui.button("Install", &install);
 
-var form_parts = [_]*gui.Node{ &greeting, &name, &users, &password, &hint, &installer };
+var disks = gui.box(.{
+
+    .gap = 4,
+
+}, &disk_list);
+
+var heading = gui.label("Install GraniteOS", theme.title_text);
+var setup_parts = [_]*gui.Node{ &heading, &disks, &installer };
+
+/// Shown instead of account setup when started from installation media.
+var setup = gui.box(theme.panel, &setup_parts);
+
+var form_parts = [_]*gui.Node{ &greeting, &name, &users, &password, &hint, &setup };
 
 var form = gui.box(.{
 
@@ -244,6 +267,30 @@ pub export fn app_main(_: usize, _: usize, environment: *const api.abi.Environme
 
         row.data = index;
         list[index] = row;
+
+    }
+
+    for (&disk_rows, 0..) |*row, index| {
+
+        row.* = gui.label("", theme.item.with(.{
+
+            .height = 40,
+            .hover = gui.Paint{
+
+                .background = gui.shade(0xffffff, 20),
+
+            },
+            .selected = gui.Paint{
+
+                .background = gui.shade(0xffffff, 34),
+
+            },
+
+        }));
+
+        row.data = index;
+        row.action = &pickDisk;
+        disk_list[index] = row;
 
     }
 
@@ -324,6 +371,7 @@ fn load() void {
 
     // Accounts live on the volume, so without one only installing can go ahead.
     bare = count == 0 and if (files.usage()) |_| false else |err| err == error.Missing;
+    if (bare) survey();
     name.invalid = false;
     password.invalid = false;
 
@@ -334,14 +382,24 @@ fn sync() void {
 
     name.hidden = state != .setup or bare;
     password.hidden = state == .setup and bare;
-    greeting.hidden = state != .setup;
+    greeting.hidden = state != .setup or bare;
     users.hidden = state == .setup;
-    installer.hidden = state != .setup or !bare or installed;
-    instruction.content.label = if (bare) "Install it on this computer to begin." else "Create the administrator account to begin.";
+    setup.hidden = state != .setup or !bare;
+    installer.hidden = drives == 0 or !installable(surveys[target]);
+    disks.hidden = installed;
+
+    for (&disk_rows, 0..) |*row, index| {
+
+        row.hidden = index >= drives;
+        row.selected = index == target;
+
+    }
+
+    if (bare and drives != 0) describe();
 
     hint.content.label = switch (state) {
 
-        .setup => notice,
+        .setup => "",
         .locked => "Locked. Enter your password to unlock.",
         else => if (count > 1) "Choose an account, then enter its password." else "",
 
@@ -495,32 +553,112 @@ fn submit(_: *gui.Node) void {
 
 }
 
-/// Installs GraniteOS beside whatever the first suitable disk holds, as the shell's `install` does.
+/// Asks the installer about every disk, then picks the first that GraniteOS can have to itself, or else one it fits beside.
+fn survey() void {
+
+    drives = 0;
+    target = 0;
+    armed = false;
+
+    const service = api.lookup(0, .install) catch return;
+
+    while (drives < surveys.len) : (drives += 1) {
+
+        surveys[drives] = .{};
+        const result = api.exchange(service, protocol.pack(.list, @intCast(drives)), std.mem.asBytes(&surveys[drives])) catch break;
+
+        if (result != 0) break;
+
+    }
+
+    for ([_]protocol.Placement{ .empty, .granite, .beside }) |wanted| {
+
+        for (surveys[0..drives], 0..) |found, index| if (found.placement == wanted) {
+
+            target = index;
+            return;
+
+        };
+
+    }
+
+}
+
+fn pickDisk(row: *gui.Node) void {
+
+    target = row.data;
+    armed = false;
+    notice = "";
+    sync();
+
+}
+
+fn installable(found: protocol.Survey) bool {
+
+    return found.placement == .empty or found.placement == .granite or found.placement == .beside;
+
+}
+
+/// Labels each disk with its size and what it holds, and the button with what pressing it does.
+fn describe() void {
+
+    for (surveys[0..drives], 0..) |found, index| {
+
+        const what = switch (found.placement) {
+
+            .unreadable => "unreadable",
+            .empty => "empty",
+            .granite => "GraniteOS",
+            .beside, .full => if (found.windows) "Windows" else "in use",
+
+        };
+
+        disk_rows[index].content.label = std.fmt.bufPrint(&disk_labels[index], "Disk {d} · {d} GB · {s}", .{ index, found.sectors / 1953125, what }) catch "";
+
+    }
+
+    // The button says how the last press went: installed, failed, or what the next press does.
+    installer.content.label = if (notice.len != 0) notice else if (armed) std.fmt.bufPrint(&button_label, "Erase disk {d} and install", .{target}) catch "" else "Install";
+
+}
+
+/// Installs on the picked disk: in its free space beside another system, or, asked twice, erasing a disk nothing else uses.
 fn install(_: *gui.Node) void {
 
     defer sync();
 
+    if (drives == 0 or installed) return;
+
+    const found = surveys[target];
+    const erase = found.placement == .empty or found.placement == .granite;
+
+    if (erase and !armed) {
+
+        armed = true;
+        return;
+
+    }
+
     const service = api.lookup(0, .install) catch {
 
-        notice = "The installer is unavailable.";
+        notice = "Install failed";
         return;
 
     };
 
-    const result = (api.checked(api.raw(.call, service, protocol.pack(.install, 0), 6000)) catch {
+    const mode: protocol.Mode = if (erase) .erase else .beside;
+    const result = (api.checked(api.raw(.call, service, protocol.pack(.install, @as(u56, @intCast(target)) | @as(u56, @intFromEnum(mode)) << 8), 6000)) catch {
 
-        notice = "The installer stopped.";
+        notice = "Install failed";
         return;
 
     }).first;
 
     notice = switch (result) {
 
-        protocol.denied => "Only an administrator may install.",
-        protocol.missing => "No disk has an EFI system partition and 64 MiB free.",
-        protocol.empty => "This media holds no boot file to install.",
-        protocol.invalid => "Installation failed.",
-        else => "Installed. Restart without the installation media to finish.",
+        protocol.missing => "No room on this disk",
+        protocol.denied, protocol.busy, protocol.empty, protocol.invalid => "Install failed",
+        else => "Installed: remove USB and restart",
 
     };
 

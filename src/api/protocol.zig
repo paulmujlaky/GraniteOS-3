@@ -76,6 +76,48 @@ pub const Operation = enum(u8) {
 
 };
 
+/// Where the installer could put GraniteOS on a disk.
+pub const Placement = enum(u8) {
+
+    /// Its partition table could not be read.
+    unreadable,
+
+    /// It holds no partitions, so it may be erased and given to GraniteOS.
+    empty,
+
+    /// Only GraniteOS uses it, so it may be erased and installed again.
+    granite,
+
+    /// Its EFI system partition and free space take GraniteOS beside what is there.
+    beside,
+
+    /// Another system uses it and leaves no room.
+    full,
+
+};
+
+/// A disk as the installer's `list` reports it: its size and largest free run in sectors, and what installing there would do.
+pub const Survey = extern struct {
+
+    sectors: u64 = 0,
+    free: u64 = 0,
+    placement: Placement = .unreadable,
+
+    /// Its EFI system partition holds Windows' boot manager.
+    windows: bool = false,
+
+};
+
+/// How `install` treats the disk it names: the first disk that takes GraniteOS beside another system, that disk only, or
+/// that disk erased.
+pub const Mode = enum(u8) {
+
+    first,
+    beside,
+    erase,
+
+};
+
 pub fn pack(kind: Operation, payload: u56) u64 {
 
     return @as(u64, payload) << 8 | @intFromEnum(kind);

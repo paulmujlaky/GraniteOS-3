@@ -77,6 +77,16 @@ pub fn Fat(comptime Disk: type) type {
 
         }
 
+        /// The first cluster of directory `name` inside `parent`, or null when it has none.
+        pub fn find(self: *Self, parent: u32, name: *const [11]u8) !?u32 {
+
+            const found = try self.search(parent, name);
+            const slot = found.match orelse return null;
+
+            return if (slot.attributes & 0x10 != 0) slot.cluster else null;
+
+        }
+
         /// Returns the cluster of directory `name` inside `parent`, creating it when absent.
         pub fn directory(self: *Self, parent: u32, name: *const [11]u8) !u32 {
 
@@ -363,6 +373,74 @@ pub fn Fat(comptime Disk: type) type {
         }
 
     };
+
+}
+
+/// Lays an empty FAT32 volume of `sectors` 512-byte sectors, one per cluster, over the partition at `first`.
+// Zeros written in runs while formatting; too large for a service's stack.
+var zeros = std.mem.zeroes([0x10000]u8);
+
+pub fn format(disk: anytype, first: u64, sectors: u32) !void {
+
+    const reserved = 32;
+    const size: u32 = (sectors - reserved + 2) * 4 / 512 + 1;
+    const clusters = sectors - reserved - 2 * size;
+
+    // Fewer clusters than this would make every driver read the volume as FAT16.
+    if (clusters < 65525) return error.Small;
+
+    var boot = std.mem.zeroes([512]u8);
+
+    boot[0..11].* = "\xeb\x58\x90GRANITE ".*;
+    std.mem.writeInt(u16, boot[11..13], 512, .little);
+    boot[13] = 1;
+    std.mem.writeInt(u16, boot[14..16], reserved, .little);
+    boot[16] = 2;
+    boot[21] = 0xf8;
+    std.mem.writeInt(u16, boot[24..26], 63, .little);
+    std.mem.writeInt(u16, boot[26..28], 255, .little);
+    std.mem.writeInt(u32, boot[28..32], @intCast(first), .little);
+    std.mem.writeInt(u32, boot[32..36], sectors, .little);
+    std.mem.writeInt(u32, boot[36..40], size, .little);
+    std.mem.writeInt(u32, boot[44..48], 2, .little);
+    std.mem.writeInt(u16, boot[48..50], 1, .little);
+    std.mem.writeInt(u16, boot[50..52], 6, .little);
+    boot[64] = 0x80;
+    boot[66] = 0x29;
+    boot[71..90].* = "GRANITEOS  FAT32   ".*;
+    boot[510] = 0x55;
+    boot[511] = 0xaa;
+
+    var info = std.mem.zeroes([512]u8);
+
+    std.mem.writeInt(u32, info[0..4], 0x41615252, .little);
+    std.mem.writeInt(u32, info[484..488], 0x61417272, .little);
+    std.mem.writeInt(u32, info[488..492], clusters - 1, .little);
+    std.mem.writeInt(u32, info[492..496], 3, .little);
+    std.mem.writeInt(u32, info[508..512], 0xaa550000, .little);
+
+    var done: u32 = 0;
+
+    // Both FATs and the root directory's one cluster start out zeroed.
+    while (done < 2 * size + 1) {
+
+        const count: u32 = @min(2 * size + 1 - done, zeros.len / 512);
+
+        try disk.write(first + reserved + done, zeros[0 .. count * 512]);
+        done += count;
+
+    }
+
+    var table = std.mem.zeroes([512]u8);
+
+    for ([_]u32{ 0x0ffffff8, 0xffffffff, end_of_chain }, 0..) |value, index| std.mem.writeInt(u32, table[index * 4 ..][0..4], value, .little);
+
+    for (0..2) |copy| try disk.write(first + reserved + copy * size, &table);
+
+    try disk.write(first + 1, &info);
+    try disk.write(first + 6, &boot);
+    try disk.write(first + 7, &info);
+    try disk.write(first, &boot);
 
 }
 

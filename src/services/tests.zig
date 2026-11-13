@@ -549,6 +549,49 @@ test "FAT32 writer fills only free clusters and survives fragmentation and rewri
 
 }
 
+test "a whole-disk install lays a fresh GPT and a FAT32 volume that both read back" {
+
+    const allocator = std.testing.allocator;
+    const sectors = 163840;
+    const disk = Memory{
+
+        .bytes = try allocator.alloc(u8, sectors * 512),
+
+    };
+    defer allocator.free(disk.bytes);
+
+    @memset(disk.bytes, 0xa5);
+
+    const table = try allocator.create(gpt.Table);
+    defer allocator.destroy(table);
+
+    try table.create(disk, sectors, [_]u8{1} ** 16);
+    try table.add(disk, gpt.esp, [_]u8{2} ** 16, .{ .first = 2048, .sectors = 70000 }, "EFI system partition");
+    try table.add(disk, volume.partition, [_]u8{3} ** 16, .{ .first = 72048, .sectors = sectors - 33 - 72048 }, "GraniteOS Data");
+
+    try std.testing.expectEqual(0xee, disk.bytes[446 + 4]);
+    try std.testing.expect(try table.read(disk, sectors));
+    try std.testing.expect(table.only(&.{ gpt.esp, gpt.reserved, volume.partition }));
+    try std.testing.expectEqual(2048, table.find(gpt.esp).?.first);
+    try std.testing.expectEqual(0, table.gap().sectors);
+
+    try std.testing.expectError(error.Small, fat.format(disk, 2048, 1000));
+    try fat.format(disk, 2048, 70000);
+
+    const esp = try allocator.create(fat.Fat(Memory));
+    defer allocator.destroy(esp);
+
+    try std.testing.expect(try esp.mount(disk, 2048));
+
+    const efi = try esp.directory(esp.root, "EFI        ");
+
+    try esp.write(try esp.directory(efi, "BOOT       "), "BOOTX64 EFI", "loader");
+    try std.testing.expectEqual(efi, (try esp.find(esp.root, "EFI        ")).?);
+    try std.testing.expect(try esp.find(efi, "BOOT       ") != null);
+    try std.testing.expectEqual(null, try esp.find(efi, "MICROS~1   "));
+
+}
+
 /// Reads `name` from a test volume with one-sector clusters, its FAT at sector 32 and data at 96.
 fn fatFile(bytes: []const u8, base: usize, directory: u32, name: []const u8, out: []u8) !usize {
 
