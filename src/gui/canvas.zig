@@ -274,6 +274,12 @@ pub const Shadow = struct {
 
 };
 
+/// One screen row's Quartz grid, mixed between the two grid rows it lies between; wide enough for an 8192-pixel screen.
+var mixed: [2048]softening.Channels = undefined;
+
+/// Where each pixel across that row samples the grid.
+var samples: [8192]Sample = undefined;
+
 /// The last shadow tile the CPU softened, kept since shadows repeat.
 var softened: [penumbra * penumbra]f32 = undefined;
 var softened_scratch: [penumbra * (penumbra + widest)]f32 = undefined;
@@ -379,9 +385,10 @@ pub const Canvas = struct {
     /// `spare` room to soften in, as with Quartz switched off, it draws `tint` solid.
     pub fn quartz(self: *Canvas, area: Rect, radius: i32, tint: u32) void {
 
-        if (self.spare.len < softening.room(self.width, self.height)) return self.round(area, radius, tint & 0xffffff);
-
         const size = softening.grid(self.width, self.height);
+
+        if (self.spare.len < softening.room(self.width, self.height) or size[0] > mixed.len or self.width > samples.len) return self.round(area, radius, tint & 0xffffff);
+
         const visible = area.intersect(self.region() orelse return) orelse return;
         const plan = softening.Plan.of(visible, size[0], size[1]) orelse return;
         const soft = self.spare[0 .. size[0] * size[1]];
@@ -393,6 +400,12 @@ pub const Canvas = struct {
 
         softening.soften(self, plan, self.spare, tint);
 
+        // The grid columns the area samples, which each row mixes between its two grid rows once rather than per pixel.
+        const first = between(@intCast(visible.x), size[0]).first;
+        const last = between(@as(usize, @intCast(visible.right())) - 1, size[0]).second;
+
+        for (samples[0..@intCast(visible.width)], @intCast(visible.x)..) |*sample, x| sample.* = between(x, size[0]);
+
         for (@intCast(visible.y)..@intCast(visible.bottom())) |y| {
 
             const fy = @as(f32, @floatFromInt(y)) + 0.5;
@@ -402,19 +415,17 @@ pub const Canvas = struct {
             const lower = soft[down.second * size[0] ..][0..size[0]];
             const row = self.pixels[y * self.width ..];
 
-            for (@intCast(visible.x)..@intCast(visible.right())) |x| {
+            for (first..last + 1) |column| mixed[column] = softening.split(upper[column]) * softening.splat(8 - down.along) + softening.split(lower[column]) * softening.splat(down.along);
+
+            for (@intCast(visible.x)..@intCast(visible.right()), samples[0..@intCast(visible.width)]) |x, across| {
 
                 const fx = @as(f32, @floatFromInt(x)) + 0.5;
                 const inside = covered(fx - std.math.clamp(fx, left + r, right - r), dy, r);
                 if (inside <= 0) continue;
 
-                const across = between(x, size[0]);
-                const near = softening.splat(8 - across.along);
-                const far = softening.splat(across.along);
-                const above = softening.split(upper[across.first]) * near + softening.split(upper[across.second]) * far;
-                const below = softening.split(lower[across.first]) * near + softening.split(lower[across.second]) * far;
+                const value = mixed[across.first] * softening.splat(8 - across.along) + mixed[across.second] * softening.splat(across.along);
 
-                blend(&row[x], softening.join(above * softening.splat(8 - down.along) + below * softening.splat(down.along), 64), inside);
+                blend(&row[x], softening.join(value, 64), inside);
 
             }
 
@@ -438,21 +449,27 @@ pub const Canvas = struct {
 
         }
 
+        // Rows past the corners soften only their left and right bands; the middle between is the caster's.
+        const near: usize = @intCast(std.math.clamp(outer.x + side, @as(i32, @intCast(clipped.left)), @as(i32, @intCast(clipped.right))));
+        const far: usize = @intCast(std.math.clamp(outer.right() - side, @as(i32, @intCast(near)), @as(i32, @intCast(clipped.right))));
+
         for (clipped.top..clipped.bottom) |y| {
 
             const fy: i32 = @intCast(y);
             const down = @min(fy - outer.y, outer.bottom() - 1 - fy);
             const row = @min(down, side - 1);
+            const spans = if (down >= side) [2][2]usize{ .{ clipped.left, near }, .{ far, clipped.right } } else [2][2]usize{ .{ clipped.left, clipped.right }, .{ 0, 0 } };
 
-            for (clipped.left..clipped.right) |x| {
+            for (spans) |span| {
 
-                const fx: i32 = @intCast(x);
-                const across = @min(fx - outer.x, outer.right() - 1 - fx);
+                for (span[0]..span[1]) |x| {
 
-                // Deep inside on both axes is the middle, which the caster covers.
-                if (down >= side and across >= side) continue;
+                    const fx: i32 = @intCast(x);
+                    const across = @min(fx - outer.x, outer.right() - 1 - fx);
 
-                blend(&self.pixels[y * self.width + x], color, softened[@as(usize, @intCast(row * side + @min(across, side - 1)))] * alpha);
+                    blend(&self.pixels[y * self.width + x], color, softened[@as(usize, @intCast(row * side + @min(across, side - 1)))] * alpha);
+
+                }
 
             }
 
@@ -779,8 +796,17 @@ fn covered(dx: f32, dy: f32, r: f32) f32 {
 
 }
 
-/// The two texels of a `count`-texel Quartz grid line that pixel `pixel` samples between, and how far along, in eighths, from the first.
-fn between(pixel: usize, count: usize) struct { first: usize, second: usize, along: u32 } {
+/// Two neighbouring texels of a Quartz grid line, and how far along, in eighths, a pixel lies from the first.
+const Sample = struct {
+
+    first: u16,
+    second: u16,
+    along: u8,
+
+};
+
+/// The two texels of a `count`-texel Quartz grid line that pixel `pixel` samples between.
+fn between(pixel: usize, count: usize) Sample {
 
     // A texel spans `quartz.scale` pixels, so the pixel's centre lies (2 * pixel - 3) / 8 texels past the centre of texel 0.
     const at = 2 * @as(i64, @intCast(pixel)) - 3;

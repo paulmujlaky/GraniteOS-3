@@ -82,6 +82,7 @@ const groups = [_]Group{
             command("permissions", "List this process' permissions", permissions),
             command("services", "List running services", services),
             command("ps", "List processes with their memory and processor use", ps),
+            command("log", "Show the kernel and service log (administrators)", log),
             command("display [WIDTHxHEIGHT]", "Show or set the screen mode (administrators)", display),
             command("install", "Install GraniteOS beside the existing OS", install),
             command("reboot", "Restart the machine", reboot),
@@ -724,6 +725,23 @@ fn uptime(_: []const u8) Error!void {
 
     const ticks = api.ticks();
     try terminal.print("{d}.{d:0>2} seconds\n", .{ ticks / 100, ticks % 100 });
+
+}
+
+fn log(_: []const u8) Error!void {
+
+    var buffer: [4096]u8 = undefined;
+    var offset: usize = 0;
+
+    while (true) {
+
+        const count = api.history(offset, &buffer) catch return terminal.write("log: administrators only\n");
+        if (count == 0) break;
+
+        try terminal.write(buffer[0..count]);
+        offset += count;
+
+    }
 
 }
 

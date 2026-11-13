@@ -95,8 +95,8 @@ fn maintain() void {
             // A lock screen that died must not leave its session's windows unguarded.
             if (image == .login) end(entry.id);
             entry.failed(now);
-            api.log("services: process lost; restart scheduled\n");
-            if (entry.offline) api.log("services: restart limit reached\n");
+            report(image, "lost; restart scheduled");
+            if (entry.offline) report(image, "reached its restart limit");
 
         }
 
@@ -108,6 +108,8 @@ fn maintain() void {
 
         if (child.number != 0) {
 
+            // Drivers whose device is missing fail here every time, so only the first attempt is reported.
+            if (entry.retries == 0) report(image, "not started");
             entry.failed(now);
             continue;
 
@@ -123,7 +125,7 @@ fn maintain() void {
 
                 _ = api.raw(.stop, entry.id, 0, 0);
                 entry.failed(api.ticks());
-                api.log("services: startup failed\n");
+                report(image, "startup failed");
                 continue;
 
             }
@@ -131,7 +133,7 @@ fn maintain() void {
         }
 
         entry.available = true;
-        if (entry.retries != 0) api.log("services: process restarted\n");
+        if (entry.retries != 0) report(image, "restarted");
 
         if (!started and entries[0].available and entries[1].available and entries[2].available) {
 
@@ -141,6 +143,14 @@ fn maintain() void {
         }
 
     }
+
+}
+
+fn report(image: api.abi.Image, event: []const u8) void {
+
+    var line: [96]u8 = undefined;
+
+    api.log(std.fmt.bufPrint(&line, "services: {s} {s}\n", .{ @tagName(image), event }) catch return);
 
 }
 

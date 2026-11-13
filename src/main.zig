@@ -2,6 +2,7 @@ const std = @import("std");
 
 const cpu = @import("arch/root.zig").cpu;
 const serial = @import("board/pc/serial.zig");
+const screen = @import("debug/screen.zig");
 const loader = @import("boot/uefi/root.zig");
 const boot = @import("boot/info.zig");
 const kernel = @import("kernel/root.zig");
@@ -10,7 +11,7 @@ const Log = @import("debug/log.zig").Log;
 
 var log = Log{
 
-    .output = serial.write,
+    .output = output,
     .scope = "boot",
 
 };
@@ -48,6 +49,13 @@ fn entry(pointer: *const anyopaque) callconv(.c) noreturn {
     log.scope = "kernel";
 
     kernel.start(info, log) catch |err| kernel.failure(@errorName(err));
+
+}
+
+fn output(bytes: []const u8) void {
+
+    serial.write(bytes);
+    screen.write(bytes);
 
 }
 

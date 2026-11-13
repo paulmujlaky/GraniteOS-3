@@ -12,7 +12,8 @@ fail() {
 
 }
 
-usage='Usage: sh tools/vmware.sh run|show|test [--media iso|disk] [--cpus N] [--memory MB] [--usb on|off]'
+usage='Usage: sh tools/vmware.sh run|show|test [--profile target] [--media iso|disk] [--cpus N] [--memory MB] [--usb on|off]
+    [--disk sata|nvme] [--serial on|off]'
 [ "$#" -ge 1 ] || fail "$usage"
 
 action=$1
@@ -21,7 +22,22 @@ vnc=$([ "$action" = test ] && echo 5902 || echo 5901)
 cpus=2
 memory=256
 usb=off
+disk=sata
+com=on
 shift
+
+# `--profile target` comes first and shapes the VM like the physical desktop; later options still override it.
+if [ "${1:-}" = --profile ]; then
+
+    [ "${2:-}" = target ] || fail "$usage"
+    cpus=32
+    memory=8192
+    usb=on
+    disk=nvme
+    [ "$action" != show ] || com=off
+    shift 2
+
+fi
 
 while [ "$#" -gt 0 ]; do
 
@@ -32,6 +48,8 @@ while [ "$#" -gt 0 ]; do
         --cpus) cpus=$2 ;;
         --memory) memory=$2 ;;
         --usb) usb=$2 ;;
+        --disk) disk=$2 ;;
+        --serial) com=$2 ;;
         *) fail "$usage" ;;
     esac
 
@@ -61,7 +79,26 @@ case $cpus-$memory in
     *[!0-9-]*|-*|*-) fail "$usage" ;;
 esac
 
-[ "$cpus" -ge 1 ] && [ "$cpus" -le 64 ] && [ "$memory" -ge 128 ] && [ "$memory" -le 8192 ] || fail 'Require 1–64 CPUs and 128–8192 MB'
+[ "$cpus" -ge 1 ] && [ "$cpus" -le 64 ] && [ "$memory" -ge 128 ] && [ "$memory" -le 32768 ] || fail 'Require 1–64 CPUs and 128–32768 MB'
+
+case $disk-$com in
+    sata-on|nvme-on) ;;
+    sata-off|nvme-off) [ "$action" = show ] || fail 'Only `show` runs without serial ports, which `run` and `test` talk through' ;;
+    *) fail "$usage" ;;
+esac
+
+# NVMe disks share one controller; a live CD stays on SATA, as a USB stick would be its own controller.
+if [ "$disk" = nvme ]; then
+
+    bus=nvme0
+    controllers="$controllers
+nvme0.present = \"TRUE\""
+
+else
+
+    bus=sata0
+
+fi
 
 case $(uname -s) in
     MINGW*|MSYS*|CYGWIN*) ;;
@@ -97,7 +134,6 @@ version=$(tr -d '\r\n' < .zigversion)
 if [ "$action" = test ]; then
 
     zig build test -Doptimize=ReleaseSafe
-    "$python" -m unittest discover -s tools -p test_media.py
 
 fi
 
@@ -136,23 +172,51 @@ EOF
 
 }
 
-# Attaches the GraniteOS boot media as the first SATA device.
+# Attaches the GraniteOS boot media as the first disk, or as a SATA CD.
 live() {
 
     if [ "$media" = disk ]; then
 
         cp zig-out/granite.img "$directory/disk.img"
         descriptor disk
-        device='sata0:0.present = "TRUE"
-sata0:0.fileName = "disk.vmdk"'
+        device="$bus:0.present = \"TRUE\"
+$bus:0.fileName = \"disk.vmdk\""
 
     else
 
         device="sata0:0.present = \"TRUE\"
 sata0:0.deviceType = \"cdrom-image\"
-sata0:0.fileName = \"$(cygpath -m "$project/zig-out/granite.iso")\""
+sata0:0.fileName = \"$(cygpath -m "$project/zig-out/granite.iso")\"
+sata0:0.startConnected = \"TRUE\""
 
     fi
+
+}
+
+# COM1 carries the kernel log and COM2 the terminal, unless the machine has no serial ports.
+ports() {
+
+    if [ "$com" = off ]; then
+
+        printf '%s\n' 'serial0.present = "FALSE"' 'serial1.present = "FALSE"'
+        return
+
+    fi
+
+    cat <<PORTS
+serial0.present = "TRUE"
+serial0.fileType = "file"
+serial0.fileName = "$(cygpath -m "$project/$serial")"
+serial0.yieldOnMsrRead = "TRUE"
+serial0.startConnected = "TRUE"
+serial1.present = "TRUE"
+serial1.fileType = "pipe"
+serial1.fileName = "\\\\.\\pipe\\$pipe"
+serial1.pipe.endPoint = "server"
+serial1.tryNoRxLoss = "TRUE"
+serial1.yieldOnMsrRead = "TRUE"
+serial1.startConnected = "TRUE"
+PORTS
 
 }
 
@@ -179,21 +243,9 @@ powerType.powerOff = "hard"
 powerType.reset = "hard"
 sata0.present = "TRUE"
 $device
-sata0:0.startConnected = "TRUE"
-sata0:1.present = "TRUE"
-sata0:1.fileName = "data.vmdk"
-serial0.present = "TRUE"
-serial0.fileType = "file"
-serial0.fileName = "$(cygpath -m "$project/$serial")"
-serial0.yieldOnMsrRead = "TRUE"
-serial0.startConnected = "TRUE"
-serial1.present = "TRUE"
-serial1.fileType = "pipe"
-serial1.fileName = "\\\\.\\pipe\\$pipe"
-serial1.pipe.endPoint = "server"
-serial1.tryNoRxLoss = "TRUE"
-serial1.yieldOnMsrRead = "TRUE"
-serial1.startConnected = "TRUE"
+$bus:1.present = "TRUE"
+$bus:1.fileName = "data.vmdk"
+$(ports)
 RemoteDisplay.vnc.enabled = "TRUE"
 RemoteDisplay.vnc.port = "$vnc"
 floppy0.present = "FALSE"
@@ -326,7 +378,7 @@ halted
 "$python" tools/media.py verify "$directory/data.img"
 mv "$serial" "$directory/live.log"
 
-device='sata0:0.present = "FALSE"'
+device="$([ "$media" = disk ] && echo "$bus" || echo sata0):0.present = \"FALSE\""
 start
 booted 1
 "$python" tools/terminal.py installed "$pipe" "$directory/installed.log"

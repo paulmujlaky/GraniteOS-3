@@ -24,6 +24,15 @@ pub const Match = union(enum) {
 /// Finds the first function matching by class code or vendor and device id.
 pub fn find(match: Match) ?u32 {
 
+    return nth(match, 0);
+
+}
+
+/// Finds the function after the first `skip` that match, in bus order.
+pub fn nth(match: Match, skip: usize) ?u32 {
+
+    var left = skip;
+
     // ponytail: brute-force scan of every bus; walk bridges if boot time matters.
     for (0..256) |bus| {
 
@@ -47,7 +56,8 @@ pub fn find(match: Match) ?u32 {
 
                 };
 
-                if (found) return at;
+                if (found and left == 0) return at;
+                if (found) left -= 1;
 
             }
 

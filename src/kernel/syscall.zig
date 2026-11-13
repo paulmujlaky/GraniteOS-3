@@ -9,6 +9,7 @@ const service = @import("service.zig");
 const shared = @import("shared.zig");
 const schedule = @import("schedule.zig");
 const firmware = @import("../boot/uefi/variable.zig");
+const screen = @import("../debug/screen.zig");
 
 const paging = arch.paging;
 const CallError = paging.MapError || ipc.IpcError || shared.SharedError || @import("elf.zig").LoadError || error{ Denied, Invalid, Busy, ProcessIdsExhausted, InvalidProcessor, NoDevice };
@@ -137,7 +138,10 @@ noinline fn invoke(task: *process.Process, ticks: u64, frame: *abi.Request) Call
 
             const address = try task.vacant();
 
-            try task.space.map(address, frame.first, paging.user | paging.writable | paging.nx | paging.uncached | paging.borrowed);
+            // A second argument of 1 asks for write-combining, which suits a framebuffer and nothing with side effects.
+            const caching = if (frame.second == 1) paging.combined else paging.uncached;
+
+            try task.space.map(address, frame.first, paging.user | paging.writable | paging.nx | caching | paging.borrowed);
             task.mapped(address);
 
             frame.first = address;
@@ -327,6 +331,18 @@ noinline fn invoke(task: *process.Process, ticks: u64, frame: *abi.Request) Call
 
             if (client.policy.layer != .application or identity.user == abi.system.user or identity.reserved != 0) return error.Invalid;
             client.identity = identity;
+
+        },
+        .history => {
+
+            // The log names processes and devices, so administrators and services read it.
+            if (!task.identity.admin and task.policy.layer != .service) return error.Denied;
+
+            var bytes: [4096]u8 = undefined;
+            const count = screen.recent(bytes[0..@min(frame.third, bytes.len)], frame.second);
+
+            try copyUser(task, frame.first, bytes[0..count], true);
+            frame.first = count;
 
         },
         .variable => {

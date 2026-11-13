@@ -137,6 +137,27 @@ pub fn writeMsr(index: u32, value: u64) void {
 
 }
 
+/// Returns EAX, EBX, ECX, and EDX for CPUID leaf `leaf` and subleaf `sub`.
+pub fn cpuid(leaf: u32, sub: u32) [4]u32 {
+
+    var a: u32 = undefined;
+    var b: u32 = undefined;
+    var c: u32 = undefined;
+    var d: u32 = undefined;
+
+    asm volatile ("cpuid" // Ask the processor what it supports.
+        : [a] "={eax}" (a),
+          [b] "={ebx}" (b),
+          [c] "={ecx}" (c),
+          [d] "={edx}" (d),
+        : [leaf] "{eax}" (leaf),
+          [sub] "{ecx}" (sub),
+    );
+
+    return .{ a, b, c, d };
+
+}
+
 pub fn relax() void {
 
     asm volatile ("pause"); // Pause briefly in the busy loop.
@@ -166,6 +187,9 @@ pub fn ticks() u64 {
     return (@as(u64, high) << 32) | low;
 
 }
+
+// The power-on layout with entry 1 turned from write-through to write-combining, which framebuffers need to be fast.
+const pat = 0x0007040600070106;
 
 pub fn features() void {
 
@@ -197,7 +221,17 @@ pub fn features() void {
         });
 
     writeMsr(0xc0000080, readMsr(0xc0000080) | (1 << 11));
-    if (readMsr(0x277) != 0x0007040600070406) @panic("Unsupported firmware PAT layout");
+    // Page tables pick memory types by this layout, whatever the firmware left.
+    if (readMsr(0x277) != pat) {
+
+        writeMsr(0x277, pat);
+        asm volatile ("wbinvd" ::: .{ // Drop cache lines filled under the old memory types.
+
+                .memory = true,
+
+            });
+
+    }
 
     asm volatile ("fninit"); // Reset the x87 floating-point state.
     const mxcsr: u32 = 0x1f80;

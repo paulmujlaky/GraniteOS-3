@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const nvme = @import("nvme.zig");
+
 const api = @import("api");
 
 const protocol = api.protocol;
@@ -23,11 +25,13 @@ const Port = enum(usize) {
 
 };
 
+/// An AHCI port's disk, or an NVMe namespace when `namespace` is set.
 const Disk = struct {
 
-    port: usize,
+    port: usize = 0,
     sectors: u64,
-    memory: api.Page,
+    memory: api.Page = undefined,
+    namespace: ?nvme.Namespace = null,
 
 };
 
@@ -36,41 +40,21 @@ var disks: [32]Disk = undefined;
 var count: usize = 0;
 var buffers: [pages]api.Page = undefined;
 var wide = false;
+var controllers: [4]nvme.Controller = undefined;
 
+/// `base` is the AHCI controller's registers, zero without one; the environment's BARs are NVMe controllers' registers.
 pub export fn app_main(_: usize, base: usize, environment: *const api.abi.Environment) callconv(.c) noreturn {
 
     api.start(environment, .service);
     if (!api.permits(.dma) or api.permits(.ports) or api.permits(.management)) api.exit(2);
 
-    const page = base & ~@as(usize, 4095);
-    const first = (api.checked(api.raw(.map, page, 0, 0)) catch api.exit(3)).first;
-    var mapped: usize = 4096;
+    for (&buffers) |*buffer| buffer.* = api.dma() catch api.exit(3);
 
-    if (api.checked(api.raw(.map, page + 4096, 0, 0))) |second| {
+    if (base != 0) ahci(base);
 
-        if (second.first == first + 4096) mapped += 4096;
+    for (environment.bars[0..controllers.len], &controllers) |bar, *controller| {
 
-    } else |_| {
-
-    }
-
-    registers = @ptrFromInt(first + base % 4096);
-    wide = registers[0] & 1 << 31 != 0;
-    registers[1] |= 1 << 31;
-
-    for (&buffers) |*buffer| {
-
-        buffer.* = api.dma() catch api.exit(3);
-        if (!wide and buffer.physical >> 32 != 0) api.exit(3);
-
-    }
-
-    const ports = @min(32, (mapped - base % 4096 - 0x100) / 0x80);
-    const implemented = registers[3];
-
-    for (0..ports) |index| {
-
-        if (implemented & @as(u32, 1) << @intCast(index) != 0) attach(index);
+        if (bar.size != 0) drive(controller, bar.base, bar.size);
 
     }
 
@@ -88,6 +72,85 @@ pub export fn app_main(_: usize, base: usize, environment: *const api.abi.Enviro
 
 }
 
+/// Brings up the NVMe controller at `base` and adds its namespaces as disks.
+fn drive(controller: *nvme.Controller, base: u64, size: u64) void {
+
+    var text: [80]u8 = undefined;
+
+    // Registers and the first doorbells fit in two pages unless the controller spaces doorbells widely.
+    const span = @min(size, 0x10000);
+    const mapped = api.map(base, span) catch |err| {
+
+        api.log(std.fmt.bufPrint(&text, "storage: NVMe registers unmapped ({s})\n", .{@errorName(err)}) catch unreachable);
+        return;
+
+    };
+
+    nvme.attach(controller, @intFromPtr(mapped), span, buffers[0]) catch |err| {
+
+        api.log(std.fmt.bufPrint(&text, "storage: NVMe controller failed ({s})\n", .{@errorName(err)}) catch unreachable);
+        return;
+
+    };
+
+    var found: [8]nvme.Namespace = undefined;
+    const namespaces = nvme.namespaces(controller, found[0..@min(found.len, disks.len - count)]);
+
+    for (found[0..namespaces]) |namespace| {
+
+        disks[count] = .{
+
+            .sectors = namespace.sectors,
+            .namespace = namespace,
+
+        };
+
+        count += 1;
+
+    }
+
+    api.log(std.fmt.bufPrint(&text, "storage: NVMe controller with {d} namespaces\n", .{namespaces}) catch unreachable);
+
+}
+
+fn ahci(base: usize) void {
+
+    const page = base & ~@as(usize, 4095);
+    const first = (api.checked(api.raw(.map, page, 0, 0)) catch return).first;
+    var mapped: usize = 4096;
+
+    if (api.checked(api.raw(.map, page + 4096, 0, 0))) |second| {
+
+        if (second.first == first + 4096) mapped += 4096;
+
+    } else |_| {
+
+    }
+
+    registers = @ptrFromInt(first + base % 4096);
+    wide = registers[0] & 1 << 31 != 0;
+    registers[1] |= 1 << 31;
+
+    for (buffers) |buffer| {
+
+        if (wide or buffer.physical >> 32 == 0) continue;
+
+        api.log("storage: AHCI controller cannot reach memory above 4 GiB\n");
+        return;
+
+    }
+
+    const ports = @min(32, (mapped - base % 4096 - 0x100) / 0x80);
+    const implemented = registers[3];
+
+    for (0..ports) |index| {
+
+        if (implemented & @as(u32, 1) << @intCast(index) != 0) attach(index);
+
+    }
+
+}
+
 fn handle(request: api.Request) u64 {
 
     const value = protocol.value(request.second);
@@ -98,7 +161,7 @@ fn handle(request: api.Request) u64 {
         .info => if (value < count) disks[value].sectors else 0,
         .read => transfer(request, false, value),
         .write => transfer(request, true, value),
-        .flush => if (value < count and issue(&disks[value], 0xea, 0, 0, false, 0)) 0 else protocol.invalid,
+        .flush => if (value < count and flush(&disks[value])) 0 else protocol.invalid,
         .crash => api.crash(request),
         else => protocol.invalid,
 
@@ -127,7 +190,9 @@ fn transfer(request: api.Request, write: bool, value: u56) u64 {
 
     }
 
-    if (!issue(disk, if (write) 0x35 else 0x25, lba, @intCast(sectors), write, length)) return protocol.invalid;
+    const moved = if (disk.namespace) |namespace| nvme.transfer(namespace, write, lba, length, buffers[0..used]) else issue(disk, if (write) 0x35 else 0x25, lba, @intCast(sectors), write, length);
+
+    if (!moved) return protocol.invalid;
 
     if (!write) {
 
@@ -136,6 +201,14 @@ fn transfer(request: api.Request, write: bool, value: u56) u64 {
     }
 
     return 0;
+
+}
+
+fn flush(disk: *const Disk) bool {
+
+    if (disk.namespace) |namespace| return nvme.flush(namespace);
+
+    return issue(disk, 0xea, 0, 0, false, 0);
 
 }
 

@@ -116,6 +116,17 @@ pub fn prepare(info: *const boot.Info, frames: *memory.Frames, log: Log) !void {
 
         if (fadt.len >= 116) {
 
+            // TMR_VAL_EXT widens the PM timer from 24 to 32 bits; the extended block, when in I/O space, overrides the legacy one.
+            const extended = fadt.len >= 220 and fadt[208] == 1 and acpi.read(u64, fadt, 212) != 0 and acpi.read(u64, fadt, 212) <= 65535;
+            const timer = if (extended) acpi.read(u64, fadt, 212) else acpi.read(u32, fadt, 76);
+
+            if (timer != 0 and timer <= 65535 and (extended or fadt[91] == 4)) {
+
+                apic.pm_port = @intCast(timer);
+                apic.pm_mask = if (acpi.read(u32, fadt, 112) & (1 << 8) != 0) 0xffffffff else 0xffffff;
+
+            }
+
             const dsdt = if (fadt.len >= 148 and acpi.read(u64, fadt, 140) != 0) acpi.read(u64, fadt, 140) else acpi.read(u32, fadt, 40);
             const types = if (firmware.load(dsdt)) |bytes| acpi.sleepTypes(bytes) else |_| null;
             const first = acpi.read(u32, fadt, 64);
@@ -152,7 +163,7 @@ pub fn prepare(info: *const boot.Info, frames: *memory.Frames, log: Log) !void {
 
     try kernel.identity(apic.base, 4096, paging.writable | paging.nx | paging.uncached);
     try kernel.protect(apic.base, paging.writable | paging.nx | paging.uncached);
-    if (info.framebuffer) |framebuffer| try kernel.identity(@intCast(framebuffer.base), @intCast(framebuffer.size), paging.writable | paging.nx | paging.uncached);
+    if (info.framebuffer) |framebuffer| if (reachable(framebuffer)) try kernel.identity(@intCast(framebuffer.base), @intCast(framebuffer.size), paging.writable | paging.nx | paging.combined);
 
     try protectImage(info);
 
@@ -160,9 +171,12 @@ pub fn prepare(info: *const boot.Info, frames: *memory.Frames, log: Log) !void {
     try kernel.protect(@intCast(info.trampoline), paging.writable);
     try kernel.guard(0);
 
+    apic.choose(info.skip.x2apic);
     apic.init();
 
     const bsp = apic.id();
+
+    if (bsp >= schedule.capacity) return error.UnsupportedApic;
 
     try addCore(bsp, frames);
 
@@ -177,8 +191,15 @@ pub fn prepare(info: *const boot.Info, frames: *memory.Frames, log: Log) !void {
         const id = if (kind == 0) @as(u32, madt[offset + 3]) else acpi.read(u32, madt, offset + 4);
         const flags = acpi.read(u32, madt, offset + (if (kind == 0) @as(usize, 4) else 8));
 
-        if (flags & 1 == 0 or id == bsp) continue;
-        if (id >= schedule.capacity) return error.UnsupportedApic;
+        if (flags & 1 == 0 or id == bsp or info.skip.processors) continue;
+
+        // Interrupt routes name processors in eight bits, so ones past that stay parked.
+        if (id >= schedule.capacity) {
+
+            log.decimal("processor left offline", id);
+            continue;
+
+        }
 
         try addCore(id, frames);
 
@@ -192,10 +213,26 @@ pub fn prepare(info: *const boot.Info, frames: *memory.Frames, log: Log) !void {
     current.tables.load(current.stack, current.emergency);
     current.online.store(true, .release);
 
-    apic.calibrate();
+    const source = try apic.calibrate();
 
+    log.line(if (apic.inherited) "local APIC in x2APIC mode, as the firmware left it" else if (apic.x2apic) "local APIC in x2APIC mode" else "local APIC in xAPIC mode");
+    log.line(switch (source) {
+
+        .pm => "timer calibrated against the ACPI PM timer",
+        .pit => "timer calibrated against the PIT",
+        .cpuid => "timer set from CPUID frequencies",
+
+    });
     log.decimal("processors", core_count);
+    log.decimal("tsc per ms", apic.tsc_per_ms);
     log.decimal("timer count", apic.timer_count);
+
+}
+
+/// The kernel maps only the first 512 GiB, so a framebuffer above that is left to the display service.
+pub fn reachable(framebuffer: boot.Framebuffer) bool {
+
+    return framebuffer.base + framebuffer.size <= memory.physical_limit;
 
 }
 
@@ -352,7 +389,9 @@ pub fn startOthers(info: *const boot.Info, entry: *const fn (*Core) callconv(.c)
 
         apic.send(core.id, 0xc500);
         apic.delay(10);
-        apic.send(core.id, 0x8500);
+
+        // x2APIC has no INIT level de-assert.
+        if (!apic.x2apic) apic.send(core.id, 0x8500);
         apic.delay(1);
         apic.send(core.id, 0x600 | @as(u32, @intCast(info.trampoline >> 12)));
         apic.delay(1);

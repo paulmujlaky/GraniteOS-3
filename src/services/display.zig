@@ -667,7 +667,8 @@ fn framebuffer(base: usize, geometry: usize, shifts: usize) void {
 
     const height = geometry >> 16 & 0xffff;
     const stride = geometry >> 32;
-    const mapped = api.map(base, stride * height * 4) catch api.exit(3);
+    // Write-combining lets the CPU stream whole lines to the device instead of one uncached store at a time.
+    const mapped = api.combine(base, stride * height * 4) catch api.exit(3);
 
     const size = gui.Rect{
 

@@ -231,13 +231,26 @@ pub fn alive(id: u64) bool {
 /// Maps `size` bytes of granted device memory at `base` as one consecutive range.
 pub fn map(base: u64, size: u64) ApiError![*]u8 {
 
+    return mapAs(base, size, 0);
+
+}
+
+/// Maps device memory write-combined: writes may merge and reorder, so only for memory without side effects, such as a framebuffer.
+pub fn combine(base: u64, size: u64) ApiError![*]u8 {
+
+    return mapAs(base, size, 1);
+
+}
+
+fn mapAs(base: u64, size: u64, caching: u64) ApiError![*]u8 {
+
     const page = base & ~@as(u64, 4095);
-    const first = (try checked(raw(.map, page, 0, 0))).first;
+    const first = (try checked(raw(.map, page, caching, 0))).first;
     var offset: u64 = 4096;
 
     while (offset < base + size - page) : (offset += 4096) {
 
-        if ((try checked(raw(.map, page + offset, 0, 0))).first != first + offset) return error.Exhausted;
+        if ((try checked(raw(.map, page + offset, caching, 0))).first != first + offset) return error.Exhausted;
 
     }
 
@@ -579,6 +592,13 @@ pub fn clock() u64 {
 }
 
 /// Fills `processes` with one record per live process, as many as fit, in no particular order; the summary says how many it wrote.
+/// Reads kernel log bytes from `offset` past the oldest kept one into `buffer`; zero once past the newest.
+pub fn history(offset: usize, buffer: []u8) ApiError!usize {
+
+    return (try checked(raw(.history, @intFromPtr(buffer.ptr), offset, buffer.len))).first;
+
+}
+
 pub fn stats(processes: []abi.Usage) ApiError!abi.Summary {
 
     var summary = abi.Summary{

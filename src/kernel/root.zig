@@ -10,6 +10,8 @@ const service = @import("service.zig");
 const shared = @import("shared.zig");
 const schedule = @import("schedule.zig");
 const debug = @import("../debug/log.zig");
+const screen = @import("../debug/screen.zig");
+const firmware = @import("../boot/uefi/variable.zig");
 const Lock = @import("lock.zig").Lock;
 const Table = @import("table.zig").Table;
 const Log = debug.Log;
@@ -30,6 +32,9 @@ pub var ticks = std.atomic.Value(u64).init(0);
 pub var runtime: u64 = 0;
 pub var efi: ?boot.Region = null;
 
+/// What the boot menu left out.
+pub var skip: boot.Skip = .{};
+
 /// Local time in seconds since 1970 when the loader read the firmware clock; `ticks` counts on from there.
 pub var epoch: u64 = 0;
 
@@ -42,8 +47,10 @@ pub fn start(info: *const boot.Info, output: Log) !noreturn {
 
     log = output;
     framebuffer = info.framebuffer;
+    if (framebuffer) |display| if (machine.reachable(display)) screen.attach(display);
     runtime = info.runtime;
     efi = info.efi;
+    skip = info.skip;
     epoch = info.clock;
     if (info.version != 3 or info.memory.len == 0) return error.InvalidBootInfo;
 
@@ -139,6 +146,8 @@ pub fn spawn(bytes: []const u8, argument: usize, home: u32) !*process.Process {
 pub fn ready() void {
 
     if (framebuffer) |display| {
+
+        if (!machine.reachable(display)) return;
 
         const pixels: [*]volatile u32 = @ptrFromInt(display.base);
 
@@ -296,13 +305,36 @@ pub fn beginFailure() void {
 
 }
 
+/// Saves the end of the log in a firmware variable, so the next boot can show what went wrong.
+fn keep() void {
+
+    var tail: [2048]u8 = undefined;
+    const count = screen.recent(&tail, screen.held() -| tail.len);
+
+    firmware.keepFailure(runtime, tail[0..count]) catch {
+
+    };
+
+}
+
 pub fn reportFailure(message: []const u8, address: ?usize) noreturn {
+
+    const visible = screen.reclaim();
 
     log.err(message);
     if (address) |value| log.hex("failure address", value);
-    log.line("rebooting after kernel failure");
+    // Without a serial port the screen is the only record, so it stays up to be read: until reset if no clock is calibrated yet.
+    if (visible and !initialized) {
 
-    if (initialized) machine.apic.delay(1000);
+        log.line("halted after kernel failure; reset to restart");
+        keep();
+        arch.cpu.halt();
+
+    }
+
+    keep();
+    log.line("rebooting after kernel failure");
+    if (initialized) machine.apic.delay(if (visible) 60_000 else 1000);
     machine.reboot();
 
 }

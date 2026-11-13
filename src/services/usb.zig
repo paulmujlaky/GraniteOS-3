@@ -44,8 +44,11 @@ const reset_change = 1 << 21;
 /// Bits of a port's status that writing back leaves as they are; the rest either clear on a one or act.
 const neutral: u32 = (1 << 0) | (1 << 3) | (0xf << 10) | (1 << 30) | (0xf << 5) | (1 << 9) | (0x3 << 14) | (0x7 << 25);
 
-/// Most devices kept, and reports queued for each.
-const most = 8;
+/// Event ring entries, leaving the page's last 64 bytes for the segment table.
+const event_slots = 252;
+
+/// Most devices kept, hubs among them, and reports queued for each.
+const most = 16;
 const queued = 8;
 
 /// One transfer request block: the unit every ring holds.
@@ -113,11 +116,72 @@ const Ring = struct {
 
 };
 
+/// Where a device sits: the root port its traffic leaves by and the hub ports on the way there.
+const Place = struct {
+
+    root: u8,
+    route: u20 = 0,
+    depth: u5 = 0,
+    speed: u32,
+
+    /// The slot of the hub it is plugged into, zero at a root port, and its port there.
+    hub: u8 = 0,
+    port: u8 = 0,
+
+    /// The high-speed hub that translates for a full- or low-speed device below it, and the port it takes.
+    translator: u8 = 0,
+    lane: u8 = 0,
+
+    /// Its slot context's first three words: route and speed with `entries` contexts, root port, and translator.
+    fn slot(self: Place, entries: u32) [3]u32 {
+
+        return .{
+
+            self.route | self.speed << 20 | entries << 27,
+            @as(u32, self.root) << 16,
+            self.translator | @as(u32, self.lane) << 8,
+
+        };
+
+    }
+
+    /// Writes where it is, such as 5 or 5.2.3, into `buffer`.
+    fn name(self: Place, buffer: []u8) []const u8 {
+
+        var length = (std.fmt.bufPrint(buffer, "{d}", .{self.root}) catch return "?").len;
+
+        for (0..self.depth) |level| {
+
+            const step = std.fmt.bufPrint(buffer[length..], ".{d}", .{self.route >> @intCast(level * 4) & 0xf}) catch break;
+            length += step.len;
+
+        }
+
+        return buffer[0..length];
+
+    }
+
+};
+
+/// A hub in a slot, whose ports are looked over now and then for devices coming and going.
+const Hub = struct {
+
+    slot: u8,
+    place: Place,
+    ports: u8,
+    control: Ring,
+    buffer: api.Page,
+
+    /// Ports, by bit, whose device was already looked at.
+    seen: u16 = 0,
+
+};
+
 /// A boot keyboard or mouse in a slot, with its interrupt endpoint's ring and report buffers.
 const Device = struct {
 
     slot: u8,
-    port: u8,
+    place: Place,
     kind: hid.Kind,
 
     /// The endpoint's device context index, and how much each report may hold.
@@ -155,6 +219,10 @@ var event_state: u32 = cycle;
 var outputs: [most + 1]?api.Page = @splat(null);
 
 var devices: [most]?Device = @splat(null);
+var hubs: [4]?Hub = @splat(null);
+
+/// When the hubs' ports are next looked over, as hubs only say so through an endpoint this driver does not read.
+var survey: u64 = 0;
 
 /// A port changed, so the ports are looked over again.
 var rescan = true;
@@ -174,7 +242,12 @@ pub export fn app_main(_: usize, base: usize, environment: *const api.abi.Enviro
     api.start(environment, .service);
     if (!api.permits(.dma) or api.permits(.ports) or api.permits(.management)) api.exit(2);
 
-    registers = @intFromPtr(api.map(base, size) catch api.exit(3));
+    registers = @intFromPtr(api.map(base, size) catch {
+
+        api.log("usb: registers unmapped\n");
+        api.exit(3);
+
+    });
 
     start() catch {
 
@@ -183,12 +256,16 @@ pub export fn app_main(_: usize, base: usize, environment: *const api.abi.Enviro
 
     };
 
+    // Looking over ports can take seconds, so the supervisor's hello is answered before the first look.
+    _ = api.greet(reply);
+
     while (true) {
 
         // Requests come first, so the supervisor's hello never waits on a slow device.
         const message = api.receive(false) catch {
 
             if (rescan) scan();
+            if (api.ticks() >= survey) inspect();
             drain();
             repeat();
             relay.forward();
@@ -197,17 +274,21 @@ pub export fn app_main(_: usize, base: usize, environment: *const api.abi.Enviro
 
         };
 
-        const result: u64 = switch (protocol.operation(message.second)) {
-
-            .hello => protocol.version,
-            .crash => api.crash(message),
-            else => protocol.invalid,
-
-        };
-
-        api.answer(message, result);
+        if (reply(message)) |result| api.answer(message, result);
 
     }
+
+}
+
+fn reply(message: api.Request) ?u64 {
+
+    return switch (protocol.operation(message.second)) {
+
+        .hello => protocol.version,
+        .crash => api.crash(message),
+        else => protocol.invalid,
+
+    };
 
 }
 
@@ -257,19 +338,19 @@ fn start() !void {
     commands = try Ring.init();
     write64(operational + 0x18, commands.page.physical | cycle);
 
-    // One event ring segment, described by a one-entry table in the same page's tail.
+    // One event ring segment, described by a one-entry table in the same page's tail, which must be 64-byte aligned.
     events = try api.dma();
     @memset(events.bytes, 0);
 
-    const segment: *[2]u64 = @ptrCast(@alignCast(events.bytes[4096 - 16 ..]));
+    const segment: *[2]u64 = @ptrCast(@alignCast(events.bytes[event_slots * @sizeOf(Trb) ..]));
 
-    segment.* = .{ events.physical, 255 };
+    segment.* = .{ events.physical, event_slots };
 
     const interrupter = runtime + 0x20;
 
     write(interrupter + 0x08, 1);
     write64(interrupter + 0x18, events.physical);
-    write64(interrupter + 0x10, events.physical + 4096 - 16);
+    write64(interrupter + 0x10, events.physical + event_slots * @sizeOf(Trb));
 
     write(operational, 1);
     try until(operational + 4, 1, 0);
@@ -323,21 +404,7 @@ fn scan() void {
 
         if (state & connected == 0) {
 
-            for (&devices) |*spot| if (spot.*) |device| if (device.port == port) {
-
-                // The slot goes back to the controller for whatever plugs in next.
-                _ = command(.{
-
-                    .control = 10 << 10 | @as(u32, device.slot) << 24,
-
-                }) catch {
-
-                };
-
-                spot.* = null;
-
-            };
-
+            forget(0, @intCast(port));
             seen[port] = false;
             continue;
 
@@ -360,7 +427,7 @@ fn scan() void {
 
 }
 
-/// Resets the device on `port`, gives it an address, and starts reading reports if it is a boot keyboard or mouse.
+/// Resets the device on root port `port`, then sets it up wherever it turns out to be useful.
 fn attach(port: u8, register: usize) !void {
 
     // USB 3 links enable themselves; USB 2 ports need a reset first.
@@ -373,7 +440,19 @@ fn attach(port: u8, register: usize) !void {
 
     }
 
-    const speed = read(register) >> 10 & 0xf;
+    try enumerate(.{
+
+        .root = port,
+        .speed = read(register) >> 10 & 0xf,
+        .port = port,
+
+    });
+
+}
+
+/// Gives the device at `place` an address, then starts reading reports if it is a boot keyboard or mouse, or looks over
+/// its ports if it is a hub.
+fn enumerate(place: Place) !void {
 
     const answer = try command(.{
 
@@ -384,6 +463,7 @@ fn attach(port: u8, register: usize) !void {
     const slot: u8 = @intCast(answer.control >> 24);
 
     if (slot == 0 or slot > slots) return error.NoSlot;
+    errdefer disable(slot);
 
     const output = outputs[slot] orelse try api.dma();
 
@@ -398,10 +478,9 @@ fn attach(port: u8, register: usize) !void {
     // Address the device with endpoint 0 at the packet size its speed starts with.
     @memset(input.bytes, 0);
     entry(input, 0)[1] = 0b11;
-    entry(input, 1)[0] = speed << 20 | 1 << 27;
-    entry(input, 1)[1] = @as(u32, port) << 16;
+    contextualize(input, place.slot(1));
 
-    endpoint(entry(input, 2), 4, switch (speed) {
+    endpoint(entry(input, 2), 4, switch (place.speed) {
 
         3 => 64,
         4 => 512,
@@ -419,7 +498,9 @@ fn attach(port: u8, register: usize) !void {
     // A full-speed device says its real packet size in the first eight bytes of its descriptor.
     try request(slot, &control, buffer, 0x80, 6, 0x0100, 0, 8);
 
-    if (speed == 1 and buffer.bytes[7] != 8) {
+    const class = buffer.bytes[4];
+
+    if (place.speed == 1 and buffer.bytes[7] != 8) {
 
         entry(input, 0)[1] = 0b10;
         endpoint(entry(input, 2), 4, buffer.bytes[7], 0, control.page.physical);
@@ -436,6 +517,8 @@ fn attach(port: u8, register: usize) !void {
     try request(slot, &control, buffer, 0x80, 6, 0x0200, 0, 9);
     try request(slot, &control, buffer, 0x80, 6, 0x0200, 0, @min(std.mem.readInt(u16, buffer.bytes[2..4], .little), 1024));
 
+    if (class == 9) return hub(slot, place, control, input, buffer);
+
     const found = hid.find(buffer.bytes[0..@min(std.mem.readInt(u16, buffer.bytes[2..4], .little), 1024)]) orelse return error.NotInput;
     const target: u8 = (found.endpoint & 0xf) * 2 + 1;
 
@@ -450,11 +533,10 @@ fn attach(port: u8, register: usize) !void {
     // The interrupt endpoint, polled as often as it asks: high-speed and later give an exponent, slower ones milliseconds.
     @memset(input.bytes, 0);
     entry(input, 0)[1] = 1 | @as(u32, 1) << @intCast(target);
-    entry(input, 1)[0] = speed << 20 | @as(u32, target) << 27;
-    entry(input, 1)[1] = @as(u32, port) << 16;
+    contextualize(input, place.slot(target));
 
     var ring = try Ring.init();
-    const interval: u32 = if (speed >= 3) std.math.clamp(found.interval, 1, 16) - 1 else std.math.clamp(std.math.log2_int(u32, @as(u32, @max(found.interval, 1)) * 8), 3, 10);
+    const interval: u32 = if (place.speed >= 3) std.math.clamp(found.interval, 1, 16) - 1 else std.math.clamp(std.math.log2_int(u32, @as(u32, @max(found.interval, 1)) * 8), 3, 10);
 
     endpoint(entry(input, target + 1), 7, found.size, interval, ring.page.physical);
 
@@ -502,7 +584,7 @@ fn attach(port: u8, register: usize) !void {
     devices[index] = .{
 
         .slot = slot,
-        .port = port,
+        .place = place,
         .kind = found.kind,
 
         .target = target,
@@ -518,8 +600,223 @@ fn attach(port: u8, register: usize) !void {
     ring_doorbell(slot, target);
 
     var line: [64]u8 = undefined;
+    var spot: [32]u8 = undefined;
 
-    api.log(std.fmt.bufPrint(&line, "usb: {s} on port {d}\n", .{ @tagName(found.kind), port }) catch unreachable);
+    api.log(std.fmt.bufPrint(&line, "usb: {s} on port {s}\n", .{ @tagName(found.kind), place.name(&spot) }) catch unreachable);
+
+}
+
+/// Configures the hub in `slot`, whose configuration descriptor `buffer` holds, powers its ports, and looks them over.
+fn hub(slot: u8, place: Place, control: Ring, input: api.Page, buffer: api.Page) !void {
+
+    const super = place.speed >= 4;
+    const index = for (&hubs, 0..) |*spot, at| {
+
+        if (spot.* == null) break at;
+
+    } else return error.Full;
+
+    // Route strings hold five hubs.
+    if (place.depth == 5) return error.Deep;
+
+    var ring = control;
+
+    try request(slot, &ring, buffer, 0x00, 9, buffer.bytes[5], 0, 0);
+    try request(slot, &ring, buffer, 0xa0, 6, if (super) 0x2a00 else 0x2900, 0, if (super) 12 else 9);
+
+    const count: u8 = @min(buffer.bytes[2], 15);
+    const settle: u64 = buffer.bytes[5];
+    const characteristics = std.mem.readInt(u16, buffer.bytes[3..5], .little);
+
+    // The controller needs to know it is a hub, how many ports it has, and how long a high-speed hub's translator thinks.
+    var words = place.slot(1);
+
+    words[0] |= 1 << 26;
+    words[1] |= @as(u32, count) << 24;
+    if (place.speed == 3) words[2] |= @as(u32, characteristics >> 5 & 3) << 16;
+
+    @memset(input.bytes, 0);
+    entry(input, 0)[1] = 1;
+    contextualize(input, words);
+
+    _ = try command(.{
+
+        .parameter = input.physical,
+        .control = configure << 10 | @as(u32, slot) << 24,
+
+    });
+
+    // SuperSpeed hubs pick their route string digit by how deep they sit.
+    if (super) try request(slot, &ring, buffer, 0x20, 12, place.depth, 0, 0);
+
+    for (1..count + 1) |port| try request(slot, &ring, buffer, 0x23, 3, 8, @intCast(port), 0);
+
+    // Ports are powered within twice the descriptor's count of milliseconds.
+    api.sleep(@max(settle * 2 / 10, 1) + 1);
+
+    hubs[index] = .{
+
+        .slot = slot,
+        .place = place,
+        .ports = count,
+        .control = ring,
+        .buffer = buffer,
+
+    };
+
+    var line: [64]u8 = undefined;
+    var spot: [32]u8 = undefined;
+
+    api.log(std.fmt.bufPrint(&line, "usb: hub on port {s} ({d} ports)\n", .{ place.name(&spot), count }) catch unreachable);
+
+    look(&(hubs[index].?));
+
+}
+
+/// Looks over every hub's ports.
+fn inspect() void {
+
+    survey = api.ticks() + 50;
+
+    for (&hubs) |*spot| if (spot.*) |*found| look(found);
+
+}
+
+/// Sets up devices that appeared on `found`'s ports and forgets those that went away.
+fn look(found: *Hub) void {
+
+    for (1..found.ports + 1) |number| {
+
+        const port: u8 = @intCast(number);
+        const bit = @as(u16, 1) << @intCast(port);
+        var state = portStatus(found, port) catch continue;
+
+        // A device unplugged and another plugged in between looks is new, though the port stayed connected.
+        if (state >> 16 & 1 != 0) {
+
+            request(found.slot, &found.control, found.buffer, 0x23, 1, 16, port, 0) catch {
+
+            };
+
+            if (found.seen & bit != 0) forget(found.slot, port);
+            found.seen &= ~bit;
+
+        }
+
+        if (state & 1 == 0) {
+
+            if (found.seen & bit != 0) forget(found.slot, port);
+            found.seen &= ~bit;
+            continue;
+
+        }
+
+        if (found.seen & bit != 0) continue;
+
+        found.seen |= bit;
+
+        // Resetting the port enables it and tells the device's speed.
+        request(found.slot, &found.control, found.buffer, 0x23, 3, 4, port, 0) catch continue;
+
+        const deadline = api.ticks() + 50;
+
+        while (api.ticks() < deadline) {
+
+            state = portStatus(found, port) catch break;
+            if (state >> 16 & 1 << 4 != 0) break;
+            api.sleep(1);
+
+        }
+
+        request(found.slot, &found.control, found.buffer, 0x23, 1, 20, port, 0) catch {
+
+        };
+
+        // Devices may take 10 ms to recover from a reset.
+        api.sleep(1);
+
+        var child = Place{
+
+            .root = found.place.root,
+            .route = found.place.route | @as(u20, port) << @intCast(found.place.depth * 4),
+            .depth = found.place.depth + 1,
+            .speed = if (found.place.speed >= 4) 4 else if (state & 1 << 9 != 0) 2 else if (state & 1 << 10 != 0) 3 else 1,
+            .hub = found.slot,
+            .port = port,
+            .translator = found.place.translator,
+            .lane = found.place.lane,
+
+        };
+
+        if (found.place.speed == 3 and child.speed < 3) {
+
+            child.translator = found.slot;
+            child.lane = port;
+
+        }
+
+        if (state & 2 == 0) continue;
+
+        enumerate(child) catch |err| {
+
+            var line: [64]u8 = undefined;
+            var spot: [32]u8 = undefined;
+
+            api.log(std.fmt.bufPrint(&line, "usb: port {s} skipped ({s})\n", .{ child.name(&spot), @errorName(err) }) catch unreachable);
+
+        };
+
+    }
+
+}
+
+/// The status and change bits of `found`'s port `port`.
+fn portStatus(found: *Hub, port: u8) !u32 {
+
+    try request(found.slot, &found.control, found.buffer, 0xa3, 0, 0, port, 4);
+
+    return std.mem.readInt(u32, found.buffer.bytes[0..4], .little);
+
+}
+
+/// Lets go of whatever sat on port `port` of the hub in slot `parent`, or of root port `port` when `parent` is zero.
+fn forget(parent: u8, port: u8) void {
+
+    for (&devices) |*spot| if (spot.*) |device| if (device.place.hub == parent and device.place.port == port) {
+
+        disable(device.slot);
+        spot.* = null;
+
+    };
+
+    for (&hubs) |*spot| if (spot.*) |found| if (found.place.hub == parent and found.place.port == port) {
+
+        spot.* = null;
+
+        for (1..found.ports + 1) |below| forget(found.slot, @intCast(below));
+        disable(found.slot);
+
+    };
+
+}
+
+/// Gives `slot` back to the controller for whatever plugs in next.
+fn disable(slot: u8) void {
+
+    _ = command(.{
+
+        .control = 10 << 10 | @as(u32, slot) << 24,
+
+    }) catch {
+
+    };
+
+}
+
+/// Writes the slot context's first three words into input context `input`.
+fn contextualize(input: api.Page, words: [3]u32) void {
+
+    for (words, 0..) |word, index| entry(input, 1)[index] = word;
 
 }
 
@@ -628,7 +925,7 @@ fn next() ?Trb {
 
     event_index += 1;
 
-    if (event_index == 255) {
+    if (event_index == event_slots) {
 
         event_index = 0;
         event_state ^= cycle;

@@ -6,6 +6,7 @@ const desktop = @import("desktop.zig");
 const api = @import("api");
 const gui = @import("gui");
 
+const protocol = api.protocol;
 const theme = gui.theme;
 pub const panic = api.panic;
 
@@ -45,7 +46,15 @@ const avatar = gui.Style{
 
 var greeter: gui.Window = undefined;
 var accounts = api.Accounts{};
+var files = api.Files{};
 var state = State.choose;
+
+/// No GraniteOS volume exists, as when started from installation media, so setup offers to install instead.
+var bare = false;
+
+/// What setup last reported, such as how installing went.
+var notice: []const u8 = "";
+var installed = false;
 
 var names: [8][32]u8 = undefined;
 var lengths: [8]usize = undefined;
@@ -165,7 +174,9 @@ var hint = gui.label("", theme.caption.with(.{
 
 }));
 
-var form_parts = [_]*gui.Node{ &greeting, &name, &users, &password, &hint };
+var installer = gui.button("Install GraniteOS", &install);
+
+var form_parts = [_]*gui.Node{ &greeting, &name, &users, &password, &hint, &installer };
 
 var form = gui.box(.{
 
@@ -310,6 +321,9 @@ fn load() void {
 
     selected = @min(selected, count -| 1);
     state = if (count == 0) .setup else .choose;
+
+    // Accounts live on the volume, so without one only installing can go ahead.
+    bare = count == 0 and if (files.usage()) |_| false else |err| err == error.Missing;
     name.invalid = false;
     password.invalid = false;
 
@@ -318,13 +332,16 @@ fn load() void {
 /// Shows what the current state calls for.
 fn sync() void {
 
-    name.hidden = state != .setup;
+    name.hidden = state != .setup or bare;
+    password.hidden = state == .setup and bare;
     greeting.hidden = state != .setup;
     users.hidden = state == .setup;
+    installer.hidden = state != .setup or !bare or installed;
+    instruction.content.label = if (bare) "Install it on this computer to begin." else "Create the administrator account to begin.";
 
     hint.content.label = switch (state) {
 
-        .setup => "",
+        .setup => notice,
         .locked => "Locked. Enter your password to unlock.",
         else => if (count > 1) "Choose an account, then enter its password." else "",
 
@@ -354,7 +371,7 @@ fn sync() void {
     } else {
 
         greeter.show();
-        greeter.focus(if (state == .setup and name_text.length == 0) &name else &password);
+        if (!bare) greeter.focus(if (state == .setup and name_text.length == 0) &name else &password);
 
     }
 
@@ -475,6 +492,39 @@ fn submit(_: *gui.Node) void {
     }
 
     state = .session;
+
+}
+
+/// Installs GraniteOS beside whatever the first suitable disk holds, as the shell's `install` does.
+fn install(_: *gui.Node) void {
+
+    defer sync();
+
+    const service = api.lookup(0, .install) catch {
+
+        notice = "The installer is unavailable.";
+        return;
+
+    };
+
+    const result = (api.checked(api.raw(.call, service, protocol.pack(.install, 0), 6000)) catch {
+
+        notice = "The installer stopped.";
+        return;
+
+    }).first;
+
+    notice = switch (result) {
+
+        protocol.denied => "Only an administrator may install.",
+        protocol.missing => "No disk has an EFI system partition and 64 MiB free.",
+        protocol.empty => "This media holds no boot file to install.",
+        protocol.invalid => "Installation failed.",
+        else => "Installed. Restart without the installation media to finish.",
+
+    };
+
+    installed = result < protocol.denied;
 
 }
 

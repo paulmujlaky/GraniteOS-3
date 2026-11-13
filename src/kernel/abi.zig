@@ -45,6 +45,9 @@ pub const Call = enum(u64) {
     physical = 31,
     clock = 32,
     stats = 33,
+
+    /// Copies kernel log bytes, oldest kept first, from offset `second` into `first`, at most `third`; returns how many.
+    history = 34,
     _,
 
 };

@@ -39,12 +39,15 @@ pub export fn app_main(_: usize, _: usize, environment: *const api.abi.Environme
     api.start(environment, .service);
     if (!api.permits(.ports) or api.permits(.mmio) or api.permits(.management)) api.exit(2);
 
+    // Ports without a controller read as all ones, as on machines with only USB input.
+    if (input(control) == 0xff) idle("input: no PS/2 controller\n");
+
     command(0xad);
     command(0xa7);
     flush();
 
     command(0x20);
-    const configuration = receive() orelse api.exit(3);
+    const configuration = receive() orelse idle("input: PS/2 controller silent\n");
 
     // Both clocks and both interrupts on, and translation to scancode set 1.
     command(0x60);
@@ -57,7 +60,7 @@ pub export fn app_main(_: usize, _: usize, environment: *const api.abi.Environme
     const keyboard = device(false, 0xf4);
     const mouse = device(true, 0xf6) and wheel() and device(true, 0xf4);
 
-    if (!keyboard and !mouse) api.exit(3);
+    if (!keyboard and !mouse) idle("input: no PS/2 devices\n");
 
     absolute = mouse and vmware() and attach();
     api.log(if (absolute) "input: ready (vmmouse)\n" else "input: ready\n");
@@ -84,6 +87,29 @@ pub export fn app_main(_: usize, _: usize, environment: *const api.abi.Environme
         };
 
         api.answer(request, result);
+
+    }
+
+}
+
+/// Answers the supervisor without a controller, so nothing waits on PS/2 and no restarts are spent on an absent device.
+fn idle(reason: []const u8) noreturn {
+
+    api.log(reason);
+
+    while (true) {
+
+        const request = api.receive(true) catch continue;
+
+        if (request.first == 0) continue;
+
+        api.answer(request, switch (protocol.operation(request.second)) {
+
+            .hello => protocol.version,
+            .crash => api.crash(request),
+            else => protocol.invalid,
+
+        });
 
     }
 
@@ -309,14 +335,14 @@ fn flush() void {
 
 fn command(byte: u8) void {
 
-    if (!wait(2, 0)) api.exit(3);
+    if (!wait(2, 0)) idle("input: PS/2 controller silent\n");
     output(control, byte);
 
 }
 
 fn send(byte: u8) void {
 
-    if (!wait(2, 0)) api.exit(3);
+    if (!wait(2, 0)) idle("input: PS/2 controller silent\n");
     output(data, byte);
 
 }

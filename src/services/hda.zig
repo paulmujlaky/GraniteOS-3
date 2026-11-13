@@ -44,6 +44,7 @@ const stream_reset = 1 << 0;
 const stream_run = 1 << 1;
 const completion = 1 << 2;
 const ring_run = 1 << 1;
+const response_flag = 1 << 0;
 
 /// Frames in each buffer the device plays, half a page of 16-bit stereo, and buffers in the ring.
 pub const period = 512;
@@ -147,7 +148,8 @@ pub const Controller = struct {
         self.write(u16, rirb_count, 1);
 
         self.write(u8, corb_control, ring_run);
-        self.write(u8, rirb_control, ring_run);
+        // The response flag must be on for clearing it to restart the count, or controllers that pause at the count, as QEMU's does, stop answering.
+        self.write(u8, rirb_control, ring_run | response_flag);
 
         // A controller whose rings stay silent may still answer one verb at a time.
         if (self.command(@as(u32, @ctz(self.codecs)) << 28 | 0xf0000) == null) {

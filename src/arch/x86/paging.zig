@@ -8,6 +8,9 @@ pub const nx: u64 = 1 << 63;
 pub const writable: u64 = 2;
 pub const user: u64 = 4;
 pub const uncached: u64 = 24;
+
+/// PWT alone selects PAT entry 1, which `cpu.features` makes write-combining.
+pub const combined: u64 = 8;
 pub const borrowed: u64 = 1 << 9;
 const mask: u64 = 0x000ffffffffff000;
 pub const MapError = memory.MemoryError || error{ InvalidAddress, AlreadyMapped, NotMapped, PermissionDenied };
@@ -45,7 +48,8 @@ pub const Space = struct {
 
     pub fn map(self: *Space, address: usize, physical: usize, flags: u64) MapError!void {
 
-        if (address % 4096 != 0 or physical % 4096 != 0 or address >= user_end or physical >= memory.physical_limit) return error.InvalidAddress;
+        // Device registers may sit anywhere the processor can address, far above RAM.
+        if (address % 4096 != 0 or physical % 4096 != 0 or address >= user_end or physical & ~mask != 0) return error.InvalidAddress;
         if (flags & user != 0 and (address < user_base or flags & (writable | nx) == writable)) return error.PermissionDenied;
 
         const entry = try self.walk(address, 12, true, flags & user);

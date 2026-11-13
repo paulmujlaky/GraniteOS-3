@@ -6,6 +6,7 @@ const ipc = @import("ipc.zig");
 const abi = @import("abi.zig");
 const schedule = @import("schedule.zig");
 const pci = @import("../board/pc/pci.zig");
+const screen = @import("../debug/screen.zig");
 const machine = @import("../arch/root.zig").machine;
 const Lock = @import("lock.zig").Lock;
 
@@ -18,6 +19,8 @@ var restarting = false;
 var attempts: u8 = 0;
 var due: u64 = 0;
 var controller: ?pci.Bar = null;
+var drives = [_]?pci.Bar{null} ** 4;
+var disks_probed = false;
 var host: ?pci.Bar = null;
 
 /// A device a driver service runs through BAR 0 alone: its PCI function, vendor and device ids, and registers.
@@ -196,11 +199,30 @@ pub fn spawn(owner: *process.Process, image: abi.Image, argument: u64, identity:
 
             });
 
-            const page = controller.?.base & ~@as(u64, 4095);
-
-            try task.grant(.mmio, page, std.mem.alignForward(u64, controller.?.base + controller.?.size, 4096) - page);
             try task.grant(.log, 0, 1);
-            task.context.frame.rsi = controller.?.base;
+
+            if (controller) |ahci| {
+
+                const page = ahci.base & ~@as(u64, 4095);
+
+                try task.grant(.mmio, page, std.mem.alignForward(u64, ahci.base + ahci.size, 4096) - page);
+                task.context.frame.rsi = ahci.base;
+
+            }
+
+            for (drives, 0..) |entry, index| {
+
+                const nvme = entry orelse continue;
+
+                try task.grant(.mmio, nvme.base, nvme.size);
+                task.environment.bars[index] = .{
+
+                    .base = nvme.base,
+                    .size = nvme.size,
+
+                };
+
+            }
 
         },
         .files => {
@@ -256,16 +278,19 @@ pub fn spawn(owner: *process.Process, image: abi.Image, argument: u64, identity:
 
             try task.grant(.log, 0, 1);
 
-            if (root.framebuffer) |screen| {
+            if (root.framebuffer) |display| {
 
-                const page = screen.base & ~@as(u64, 4095);
+                const page = display.base & ~@as(u64, 4095);
 
-                try task.grant(.mmio, page, std.mem.alignForward(u64, screen.base + @as(u64, screen.stride) * screen.height * 4, 4096) - page);
-                task.context.frame.rsi = screen.base;
-                task.context.frame.rcx = screen.width | @as(u64, screen.height) << 16 | @as(u64, screen.stride) << 32;
-                task.context.frame.r8 = @ctz(screen.red_mask) | @as(u64, @ctz(screen.green_mask)) << 8 | @as(u64, @ctz(screen.blue_mask)) << 16;
+                try task.grant(.mmio, page, std.mem.alignForward(u64, display.base + @as(u64, display.stride) * display.height * 4, 4096) - page);
+                task.context.frame.rsi = display.base;
+                task.context.frame.rcx = display.width | @as(u64, display.height) << 16 | @as(u64, display.stride) << 32;
+                task.context.frame.r8 = @ctz(display.red_mask) | @as(u64, @ctz(display.green_mask)) << 8 | @as(u64, @ctz(display.blue_mask)) << 16;
 
             }
+
+            // The display draws the screen from now on; the log keeps its history for a kernel failure.
+            screen.release();
 
             if (adapter) |graphics| {
 
@@ -367,9 +392,26 @@ fn probe(image: abi.Image) !void {
     lock.acquire();
     defer lock.release();
 
-    // AHCI: mass storage, SATA, AHCI 1.0; ABAR is BAR 5.
-    if (image == .storage and controller == null) controller = if (pci.find(.{ .class = 0x010601 })) |at| pci.bar(at, 5) else null;
-    if (image == .storage and controller == null) return error.NoDevice;
+    const skip = root.skip;
+
+    if (image == .usb and skip.usb or image == .audio and skip.audio or image == .net and skip.network) return error.NoDevice;
+
+    if (image == .storage and !disks_probed) {
+
+        disks_probed = true;
+
+        // AHCI: mass storage, SATA, AHCI 1.0; ABAR is BAR 5. NVMe: mass storage, non-volatile memory, NVMe; BAR 0.
+        controller = if (pci.find(.{ .class = 0x010601 })) |at| pci.bar(at, 5) else null;
+
+        if (!skip.nvme) for (&drives, 0..) |*entry, index| {
+
+            entry.* = if (pci.nth(.{ .class = 0x010802 }, index)) |at| pci.bar(at, 0) else null;
+
+        };
+
+    }
+
+    if (image == .storage and controller == null and drives[0] == null) return error.NoDevice;
 
     if (image == .display and !probed) {
 
@@ -380,8 +422,8 @@ fn probe(image: abi.Image) !void {
 
     if (image == .display and root.framebuffer == null and adapter == null) return error.NoDevice;
 
-    // xHCI: serial bus, USB, xHCI; its registers are BAR 0.
-    if (image == .usb and host == null) host = if (pci.find(.{ .class = 0x0c0330 })) |at| pci.bar(at, 0) else null;
+    // xHCI: serial bus, USB, xHCI; its registers are BAR 0. The chipset's own controller serves most ports, so it comes first.
+    if (image == .usb and host == null) host = if (intelHost() orelse pci.find(.{ .class = 0x0c0330 })) |at| pci.bar(at, 0) else null;
     if (image == .usb and host == null) return error.NoDevice;
 
     if (image == .net and nic == null) nic = ethernet();
@@ -389,6 +431,20 @@ fn probe(image: abi.Image) !void {
 
     if (image == .audio and sound == null) sound = audio();
     if (image == .audio and sound == null) return error.NoDevice;
+
+}
+
+fn intelHost() ?u32 {
+
+    var index: usize = 0;
+
+    while (pci.nth(.{ .class = 0x0c0330 }, index)) |at| : (index += 1) {
+
+        if (pci.id(at) & 0xffff == 0x8086) return at;
+
+    }
+
+    return null;
 
 }
 
@@ -471,6 +527,9 @@ fn svga() ?Graphics {
 
 }
 
+/// The I225 and I226 2.5GbE controllers, whose registers and descriptors the e1000e driver does not speak.
+const igc = [_]u16{ 0x15f2, 0x15f3, 0x15f7, 0x15f8, 0x15fd, 0x125b, 0x125c, 0x125d, 0x125f, 0x3100, 0x3101, 0x3102, 0x5502 };
+
 /// An Intel Ethernet controller of the e1000e family, such as VMware's 82574L or the I219-V: its registers are BAR 0.
 fn ethernet() ?Function {
 
@@ -478,6 +537,7 @@ fn ethernet() ?Function {
     const device = pci.id(at);
 
     if (device & 0xffff != 0x8086) return null;
+    if (std.mem.indexOfScalar(u16, &igc, @intCast(device >> 16)) != null) return null;
 
     return .{
 

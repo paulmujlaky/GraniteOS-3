@@ -4,6 +4,7 @@ const boot = @import("../info.zig");
 const memory = @import("map.zig");
 const graphics = @import("graphics.zig");
 const clock = @import("clock.zig");
+const menu = @import("menu.zig");
 const Log = @import("../../debug/log.zig").Log;
 
 const uefi = std.os.uefi;
@@ -18,6 +19,7 @@ pub fn prepare(log: Log) !*const boot.Info {
     try services.setWatchdogTimer(0, 0, null);
     console("\r\nGraniteOS 3\r\nPreparing firmware handoff.\r\nA green band at the top confirms boot completed.\r\nSerial diagnostics: COM1, 115200 8N1.\r\n");
 
+    const skip = menu.choose(services, @intFromPtr(table.runtime_services), log);
     const loaded = try services.handleProtocol(uefi.protocol.LoadedImage, uefi.handle) orelse return LoaderError.MissingLoadedImage;
     const info_bytes = try services.allocatePool(.loader_data, @sizeOf(boot.Info));
     const info: *boot.Info = @ptrCast(@alignCast(info_bytes.ptr));
@@ -50,12 +52,13 @@ pub fn prepare(log: Log) !*const boot.Info {
 
         },
 
-        .framebuffer = try graphics.capture(services),
+        .framebuffer = try graphics.capture(services, log),
         .acpi_rsdp = findAcpi(table),
         .trampoline = @intFromPtr(trampoline.ptr),
         .runtime = @intFromPtr(table.runtime_services),
         .efi = copy(services, loaded),
         .clock = clock.capture(table.runtime_services),
+        .skip = skip,
 
     };
 

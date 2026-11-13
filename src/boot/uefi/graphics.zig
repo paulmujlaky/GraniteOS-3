@@ -1,13 +1,17 @@
 const std = @import("std");
 
 const boot = @import("../info.zig");
+const Log = @import("../../debug/log.zig").Log;
 
 const uefi = std.os.uefi;
 const Graphics = uefi.protocol.GraphicsOutput;
 
-pub fn capture(services: *uefi.tables.BootServices) !?boot.Framebuffer {
+pub fn capture(services: *uefi.tables.BootServices, log: Log) !?boot.Framebuffer {
 
     const graphics = try services.locateProtocol(Graphics, null) orelse return null;
+
+    if (prefer(graphics)) log.line("screen mode set to 1920x1080");
+
     const mode = graphics.mode;
 
     if (mode.size_of_info < @sizeOf(Graphics.Mode.Info)) return null;
@@ -58,6 +62,31 @@ pub fn capture(services: *uefi.tables.BootServices) !?boot.Framebuffer {
     if (info.pixel_format == .bit_mask and (masks.red_mask | masks.green_mask | masks.blue_mask | masks.reserved_mask) <= 0xffffff) return null;
 
     return framebuffer;
+
+}
+
+/// The CPU draws every pixel without a GPU driver, so a mode larger than 1920x1080 drops to that one when the display offers it.
+fn prefer(graphics: *Graphics) bool {
+
+    const current = graphics.mode.info;
+
+    if (graphics.mode.size_of_info < @sizeOf(Graphics.Mode.Info)) return false;
+    if (@as(u64, current.horizontal_resolution) * current.vertical_resolution <= 1920 * 1080) return false;
+
+    for (0..graphics.mode.max_mode) |index| {
+
+        const info = graphics.queryMode(@intCast(index)) catch continue;
+
+        if (info.horizontal_resolution != 1920 or info.vertical_resolution != 1080) continue;
+        if (info.pixel_format != .blue_green_red_reserved_8_bit_per_color and info.pixel_format != .red_green_blue_reserved_8_bit_per_color) continue;
+
+        graphics.setMode(@intCast(index)) catch return false;
+
+        return true;
+
+    }
+
+    return false;
 
 }
 
