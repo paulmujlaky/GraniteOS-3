@@ -77,6 +77,21 @@ pub fn Fat(comptime Disk: type) type {
 
         }
 
+        /// Bytes in the clusters the FAT marks free.
+        pub fn available(self: *Self) !u64 {
+
+            var free: u64 = 0;
+
+            for (2..@as(usize, self.clusters) + 2) |cluster| {
+
+                if (try self.follow(@intCast(cluster)) == 0) free += 1;
+
+            }
+
+            return free * self.per * 512;
+
+        }
+
         /// The first cluster of directory `name` inside `parent`, or null when it has none.
         pub fn find(self: *Self, parent: u32, name: *const [11]u8) !?u32 {
 

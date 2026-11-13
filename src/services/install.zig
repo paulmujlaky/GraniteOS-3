@@ -4,6 +4,7 @@ const volume = @import("volume.zig");
 const disk = @import("disk.zig");
 const gpt = @import("gpt.zig");
 const fat = @import("fat.zig");
+const ntfs = @import("ntfs.zig");
 
 const api = @import("api");
 
@@ -11,6 +12,7 @@ const protocol = api.protocol;
 pub const panic = api.panic;
 
 const minimum = (64 << 20) / 512;
+const share = protocol.share;
 
 /// The EFI system partition a whole disk gets: 256 MiB, room for the loader many times over.
 const system_size = (256 << 20) / 512;
@@ -19,6 +21,7 @@ const description = "GraniteOS";
 
 var table: gpt.Table = undefined;
 var esp: fat.Fat(disk.Disk) = undefined;
+var windows: ntfs.Ntfs(disk.Disk) = undefined;
 
 var accounts = api.Accounts{
 
@@ -68,6 +71,7 @@ fn handle(message: api.Request) u64 {
 
                 if (err == error.Missing) return protocol.missing;
                 if (err == error.Denied) return protocol.busy;
+                if (err == error.Full) return protocol.full;
                 api.log("install: failed\n");
 
                 return protocol.invalid;
@@ -106,7 +110,8 @@ fn install(value: u56) !u64 {
 
 }
 
-/// Installs beside the system on disk `index`, sharing its EFI system partition; null without room or such a partition.
+/// Installs beside the system on disk `index`, sharing its EFI system partition: in `share` sectors of free space, else
+/// taken from the end of a Windows volume, else in what free space there is; null without room or such a partition.
 fn beside(index: u8) !?u64 {
 
     const sectors = try disk.sectors(index);
@@ -126,13 +131,66 @@ fn beside(index: u8) !?u64 {
 
     if (table.find(volume.partition) == null) {
 
-        const free = table.gap();
-        if (free.sectors < minimum) return null;
+        if (!table.room()) return null;
 
-        try table.add(target, volume.partition, unique(), free, "GraniteOS Data");
+        // Checked before anything changes, so a full EFI partition never leaves Windows shrunk for nothing.
+        if (!try roomy()) {
+
+            api.log("install: the EFI system partition lacks room for the loader\n");
+            return error.Full;
+
+        }
+
+        const free = table.gap();
+        var range = volume.Range{
+
+            .first = free.first,
+            .sectors = @min(free.sectors, share),
+
+        };
+
+        if (free.sectors < share) {
+
+            const found = try plan(target);
+
+            if (found.cut) |cut| {
+
+                if (try windows.mount(target, cut.partition.first) != .ready) return error.Invalid;
+
+                try windows.shrink(cut.keep);
+                table.shorten(cut.partition, cut.partition.first + cut.keep - 1);
+                api.log("install: took 25 GB from the end of a Windows volume\n");
+
+                range = .{
+
+                    .first = cut.partition.first + cut.keep,
+                    .sectors = share,
+
+                };
+
+            } else if (free.sectors < minimum) {
+
+                api.log(switch (found.obstacle) {
+
+                    .none => "install: no room and no NTFS volume to take it from\n",
+                    .used => "install: files fill the last 25 GB of the Windows volume\n",
+                    .hibernated => "install: Windows is hibernated; turn off Fast Startup and shut down\n",
+                    .dirty => "install: the Windows volume needs a disk check first\n",
+                    .encrypted => "install: BitLocker encrypts the Windows volume\n",
+                    .boot => "install: the EFI system partition lacks room for the loader\n",
+
+                });
+
+                return null;
+
+            }
+
+        }
+
+        try table.add(target, volume.partition, unique(), range, "GraniteOS Data");
 
         // Old bytes in the free space must never pass for a volume.
-        try target.write(free.first, &std.mem.zeroes([512]u8));
+        try target.write(range.first, &std.mem.zeroes([512]u8));
 
     }
 
@@ -142,7 +200,8 @@ fn beside(index: u8) !?u64 {
 
 }
 
-/// Gives all of disk `index` to GraniteOS: a new partition table, its own EFI system partition, and a data partition after it.
+/// Gives disk `index` to GraniteOS: a new partition table, its own EFI system partition, and a data partition of up to
+/// `share` sectors after it.
 fn erase(index: u8) !u64 {
 
     const sectors = try disk.sectors(index);
@@ -164,7 +223,7 @@ fn erase(index: u8) !u64 {
 
     try table.create(target, sectors, unique());
     try table.add(target, gpt.esp, unique(), .{ .first = 2048, .sectors = system_size }, "EFI system partition");
-    try table.add(target, volume.partition, unique(), .{ .first = data, .sectors = sectors - 33 - data }, "GraniteOS Data");
+    try table.add(target, volume.partition, unique(), .{ .first = data, .sectors = @min(share, sectors - 33 - data) }, "GraniteOS Data");
     try target.write(data, &std.mem.zeroes([512]u8));
     try fat.format(target, 2048, system_size);
 
@@ -224,8 +283,11 @@ fn examine(index: u8, sectors: u64) !protocol.Survey {
     }
 
     const system = table.find(gpt.esp);
+    var mounted = false;
 
     if (system) |partition| if (try esp.mount(target, partition.first)) {
+
+        mounted = true;
 
         // Windows names its folder Microsoft, whose short name is MICROS~1; MICROSOF stands in for it in test images.
         if (try esp.find(esp.root, "EFI        ")) |efi| result.windows = try esp.find(efi, "MICROS~1   ") != null or try esp.find(efi, "MICROSOF   ") != null;
@@ -237,9 +299,147 @@ fn examine(index: u8, sectors: u64) !protocol.Survey {
     const data = table.find(volume.partition) != null;
     const ours = table.only(&.{ gpt.esp, gpt.reserved, volume.partition }) and !result.windows;
 
-    result.placement = if (ours) (if (system != null or data) .granite else .empty) else if (system != null and (data or result.free >= minimum)) .beside else .full;
+    result.existing = data;
+
+    if (ours) {
+
+        result.placement = if (system != null or data) .granite else .empty;
+        return result;
+
+    }
+
+    // Installing beside reuses a GraniteOS partition, or needs a free table slot and room in the EFI partition.
+    result.placement = .full;
+
+    if (!mounted) return result;
+
+    if (data) {
+
+        result.placement = .beside;
+        return result;
+
+    }
+
+    if (!table.room()) return result;
+
+    if (!try roomy()) {
+
+        result.obstacle = .boot;
+        return result;
+
+    }
+
+    if (result.free >= share) {
+
+        result.placement = .beside;
+        return result;
+
+    }
+
+    const found = try plan(target);
+
+    result.shrink = found.cut != null;
+    result.obstacle = found.obstacle;
+    if (result.shrink or result.free >= minimum) result.placement = .beside;
 
     return result;
+
+}
+
+/// Whether the mounted EFI system partition can take the loader, with a margin for its directories.
+fn roomy() !bool {
+
+    return try esp.available() >= length + (1 << 20);
+
+}
+
+const Cut = struct {
+
+    partition: gpt.Partition,
+
+    /// The sectors the partition keeps; GraniteOS gets the `share` after them.
+    keep: u64,
+
+};
+
+const Plan = struct {
+
+    cut: ?Cut = null,
+    obstacle: protocol.Obstacle = .none,
+
+};
+
+/// The largest NTFS partition in the table read last that can give its end to GraniteOS, or what stops the largest.
+fn plan(target: disk.Disk) !Plan {
+
+    var result = Plan{
+
+    };
+
+    var best: u64 = 0;
+    var blocked: u64 = 0;
+
+    for (0..table.slots()) |index| {
+
+        const partition = table.at(index) orelse continue;
+        if (!std.mem.eql(u8, &partition.kind, &ntfs.basic)) continue;
+
+        const size = partition.last - partition.first + 1;
+
+        // The volume keeps at least as much as GraniteOS takes.
+        if (size < 2 * share + 2048) continue;
+
+        const keep = std.mem.alignBackward(u64, partition.last + 1 - share, 2048) - partition.first;
+        const verdict = judge(target, partition, keep) catch .foreign;
+
+        if (verdict == .ready and size > best) {
+
+            best = size;
+            result.cut = .{
+
+                .partition = partition,
+                .keep = keep,
+
+            };
+
+        } else if (verdict != .ready and verdict != .foreign and size > blocked) {
+
+            blocked = size;
+            result.obstacle = switch (verdict) {
+
+                .used => .used,
+                .hibernated => .hibernated,
+                .dirty => .dirty,
+                .encrypted => .encrypted,
+                .ready, .foreign => .none,
+
+            };
+
+        }
+
+    }
+
+    if (result.cut != null) result.obstacle = .none;
+
+    return result;
+
+}
+
+/// Whether the NTFS volume in `partition` can end within its first `keep` sectors.
+fn judge(target: disk.Disk, partition: gpt.Partition, keep: u64) !ntfs.Verdict {
+
+    const found = try windows.mount(target, partition.first);
+    if (found != .ready) return found;
+
+    if (windows.sectors > partition.last - partition.first) return .foreign;
+
+    const settled = try windows.settled();
+    if (settled != .ready) return settled;
+
+    if (keep > windows.sectors) return .ready;
+    if (!try windows.unused((keep - 1) / windows.cluster, windows.sectors / windows.cluster)) return .used;
+
+    return .ready;
 
 }
 

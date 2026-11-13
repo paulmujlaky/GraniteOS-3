@@ -25,6 +25,7 @@ const limit = 128 * 128;
 pub const Partition = struct {
 
     number: u32,
+    kind: [16]u8,
     first: u64,
     last: u64,
     unique: [16]u8,
@@ -117,23 +118,61 @@ pub const Table = struct {
 
     pub fn find(self: *const Table, kind: [16]u8) ?Partition {
 
-        for (0..field(u32, &self.header, 80)) |index| {
+        for (0..self.slots()) |index| {
 
-            const entry = self.record(index);
-            if (!std.mem.eql(u8, entry[0..16], &kind)) continue;
-
-            return .{
-
-                .number = @intCast(index + 1),
-                .first = field(u64, entry, 32),
-                .last = field(u64, entry, 40),
-                .unique = entry[16..32].*,
-
-            };
+            const found = self.at(index) orelse continue;
+            if (std.mem.eql(u8, &found.kind, &kind)) return found;
 
         }
 
         return null;
+
+    }
+
+    pub fn slots(self: *const Table) usize {
+
+        return field(u32, &self.header, 80);
+
+    }
+
+    /// The partition recorded in slot `index`, if any.
+    pub fn at(self: *const Table, index: usize) ?Partition {
+
+        if (!self.used(index)) return null;
+
+        const entry = self.record(index);
+
+        return .{
+
+            .number = @intCast(index + 1),
+            .kind = entry[0..16].*,
+            .first = field(u64, entry, 32),
+            .last = field(u64, entry, 40),
+            .unique = entry[16..32].*,
+
+        };
+
+    }
+
+    /// Whether `add` has an empty slot to fill.
+    pub fn room(self: *const Table) bool {
+
+        for (0..self.slots()) |index| {
+
+            if (!self.used(index)) return true;
+
+        }
+
+        return false;
+
+    }
+
+    /// Ends `partition` at sector `last` in memory; the next `add` writes the change out with its own.
+    pub fn shorten(self: *Table, partition: Partition, last: u64) void {
+
+        const entry = self.entries[(partition.number - 1) * field(u32, &self.header, 84) ..][0..128];
+
+        std.mem.writeInt(u64, entry[40..48], last, .little);
 
     }
 

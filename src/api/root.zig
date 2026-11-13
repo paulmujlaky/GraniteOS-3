@@ -100,12 +100,19 @@ pub fn call(peer: u64, message: u64) ApiError!u64 {
 /// Lends `window` to the peer until it replies; the peer reads and writes it with `fetch` and `store`.
 pub fn exchange(peer: u64, message: u64, window: []u8) ApiError!u64 {
 
+    return exchangeWithin(peer, message, window, 1000);
+
+}
+
+/// As `exchange`, waiting up to `limit` ticks for the reply.
+pub fn exchangeWithin(peer: u64, message: u64, window: []u8, limit: u64) ApiError!u64 {
+
     var request = Request{
 
         .number = @intFromEnum(abi.Call.call),
         .first = peer,
         .second = message,
-        .third = 1000,
+        .third = limit,
         .fourth = @intFromPtr(window.ptr),
         .fifth = window.len,
 

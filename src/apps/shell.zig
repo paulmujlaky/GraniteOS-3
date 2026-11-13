@@ -85,7 +85,7 @@ const groups = [_]Group{
             command("log", "Show the kernel and service log (administrators)", log),
             command("display [WIDTHxHEIGHT]", "Show or set the screen mode (administrators)", display),
             command("disks", "List disks and where GraniteOS can be installed", disks),
-            command("install [DISK [beside|erase]]", "Install GraniteOS beside the existing OS, or on an empty disk", install),
+            command("install [DISK [beside|erase]]", "Install GraniteOS in 25 GB beside the existing OS, or on an empty disk", install),
             command("reboot", "Restart the machine", reboot),
             command("shutdown", "Power off the machine", shutdown),
 
@@ -828,19 +828,28 @@ fn disks(_: []const u8) Error!void {
     while (index < 32) : (index += 1) {
 
         var survey = protocol.Survey{};
-        const result = api.exchange(installer, protocol.pack(.list, index), std.mem.asBytes(&survey)) catch return terminal.write("disks: installer disconnected\n");
+        const result = api.exchangeWithin(installer, protocol.pack(.list, index), std.mem.asBytes(&survey), 6000) catch return terminal.write("disks: installer disconnected\n");
 
         if (result != 0) break;
 
-        try terminal.print("{d}  {d} MiB  {s}{s}\n", .{ index, survey.sectors / 2048, switch (survey.placement) {
+        try terminal.print("{d}  {d} MiB  {s}{s}{s}\n", .{ index, survey.sectors / 2048, switch (survey.placement) {
 
             .unreadable => "unreadable",
             .empty => "empty: install with 'install N erase'",
             .granite => "GraniteOS only: install again with 'install N erase'",
-            .beside => "room beside the existing system: 'install N beside'",
+            .beside => if (survey.shrink) "room once 25 GB is taken from its NTFS volume: 'install N beside'" else "room beside the existing system: 'install N beside'",
             .full => "used by another system, with no room",
 
-        }, if (survey.windows) " (Windows)" else "" });
+        }, if (survey.windows) " (Windows)" else "", switch (survey.obstacle) {
+
+            .none => "",
+            .used => "; files fill the last 25 GB of its NTFS volume",
+            .hibernated => "; Windows is hibernated, so turn off Fast Startup",
+            .dirty => "; its NTFS volume needs a disk check in Windows",
+            .encrypted => "; BitLocker encrypts its NTFS volume",
+            .boot => "; its EFI system partition lacks room for the loader",
+
+        } });
 
     }
 

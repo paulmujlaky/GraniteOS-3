@@ -106,6 +106,40 @@ pub const Survey = extern struct {
     /// Its EFI system partition holds Windows' boot manager.
     windows: bool = false,
 
+    /// Installing takes `share` sectors from the end of a Windows volume, for want of free space.
+    shrink: bool = false,
+
+    /// What keeps GraniteOS off a `full` disk.
+    obstacle: Obstacle = .none,
+
+    /// It already holds a GraniteOS data partition, which installing again keeps.
+    existing: bool = false,
+
+};
+
+/// The size of the data partition the installer makes: 25 GiB, in sectors.
+pub const share = (25 << 30) / 512;
+
+/// Why the installer cannot put GraniteOS beside the system on a disk.
+pub const Obstacle = enum(u8) {
+
+    none,
+
+    /// Files occupy the volume's last 25 GB.
+    used,
+
+    /// Windows is hibernated, or shut down with Fast Startup, and would resume onto the volume as it left it.
+    hibernated,
+
+    /// Windows marked the volume for checking, or left changes unfinished in its journal.
+    dirty,
+
+    /// BitLocker encrypts the volume.
+    encrypted,
+
+    /// Its EFI system partition lacks room for the GraniteOS loader.
+    boot,
+
 };
 
 /// How `install` treats the disk it names: the first disk that takes GraniteOS beside another system, that disk only, or

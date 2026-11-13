@@ -6,6 +6,7 @@ const protocol = @import("../api/protocol.zig");
 const volume = @import("volume.zig");
 const gpt = @import("gpt.zig");
 const fat = @import("fat.zig");
+const ntfs = @import("ntfs.zig");
 const gpu = @import("gpu.zig");
 const hid = @import("hid.zig");
 const wire = @import("wire.zig");
@@ -589,6 +590,42 @@ test "a whole-disk install lays a fresh GPT and a FAT32 volume that both read ba
     try std.testing.expectEqual(efi, (try esp.find(esp.root, "EFI        ")).?);
     try std.testing.expect(try esp.find(efi, "BOOT       ") != null);
     try std.testing.expectEqual(null, try esp.find(efi, "MICROS~1   "));
+
+}
+
+test "shortening a partition and adding one after it writes both to the table at once" {
+
+    const allocator = std.testing.allocator;
+    const sectors = 65536;
+    const disk = Memory{
+
+        .bytes = try allocator.alloc(u8, sectors * 512),
+
+    };
+    defer allocator.free(disk.bytes);
+
+    @memset(disk.bytes, 0);
+
+    const table = try allocator.create(gpt.Table);
+    defer allocator.destroy(table);
+
+    try table.create(disk, sectors, [_]u8{1} ** 16);
+    try table.add(disk, gpt.esp, [_]u8{2} ** 16, .{ .first = 2048, .sectors = 2048 }, "EFI system partition");
+    try table.add(disk, ntfs.basic, [_]u8{3} ** 16, .{ .first = 4096, .sectors = sectors - 34 - 4096 }, "Basic data partition");
+
+    const windows = table.find(ntfs.basic).?;
+
+    try std.testing.expect(table.room());
+    try std.testing.expectEqual(0, table.gap().sectors);
+
+    table.shorten(windows, 40959);
+    try table.add(disk, volume.partition, [_]u8{4} ** 16, .{ .first = 40960, .sectors = 8192 }, "GraniteOS Data");
+
+    try std.testing.expect(try table.read(disk, sectors));
+    try std.testing.expectEqual(40959, table.find(ntfs.basic).?.last);
+    try std.testing.expectEqual(40960, table.find(volume.partition).?.first);
+    try std.testing.expectEqual(49152, table.gap().first);
+    try std.testing.expectEqualSlices(u8, &ntfs.basic, &table.at(1).?.kind);
 
 }
 

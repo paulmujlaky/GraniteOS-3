@@ -52,20 +52,30 @@ var state = State.choose;
 /// No GraniteOS volume exists, as when started from installation media, so setup offers to install instead.
 var bare = false;
 
-/// What setup last reported, such as how installing went.
+/// What setup last reported, such as why installing failed.
 var notice: []const u8 = "";
 var installed = false;
 
-/// The disks the installer reported, the one picked, and whether erasing it was asked for once already.
+/// Set by the Install button and acted on by the main loop, once the screen shows that installing has begun.
+var installing = false;
+
+/// The disks the installer reported, the one picked, and whether erasing or shrinking it was asked for once already.
 var surveys: [6]protocol.Survey = undefined;
 var drives: usize = 0;
 var target: usize = 0;
 var armed = false;
 
-var disk_labels: [6][96]u8 = undefined;
+var disk_titles: [6][32]u8 = undefined;
+var disk_names: [6]gui.Node = undefined;
+var disk_states: [6]gui.Node = undefined;
+var disk_parts: [6][2]*gui.Node = undefined;
 var disk_rows: [6]gui.Node = undefined;
 var disk_list: [6]*gui.Node = undefined;
+var detail_bytes: [64]u8 = undefined;
 var button_label: [64]u8 = undefined;
+
+/// The setup panel's width while it offers to install; account setup keeps the narrower form.
+const wide = 480;
 
 var names: [8][32]u8 = undefined;
 var lengths: [8]usize = undefined;
@@ -187,17 +197,54 @@ var hint = gui.label("", theme.caption.with(.{
 
 var installer = gui.button("Install", &install);
 
+var heading = gui.label("Install GraniteOS", .{
+
+    .size = 26,
+
+});
+
 var disks = gui.box(.{
 
-    .gap = 4,
+    .gap = 6,
 
 }, &disk_list);
 
-var heading = gui.label("Install GraniteOS", theme.title_text);
-var setup_parts = [_]*gui.Node{ &heading, &disks, &installer };
+var details: [2]gui.Node = .{
+
+    gui.label("", .{}),
+    gui.label("", theme.caption),
+
+};
+
+var detail_parts = [_]*gui.Node{ &details[0], &details[1] };
+
+/// What installing on the picked disk will do, or why it cannot.
+var summary = gui.box(.{
+
+    .padding = .all(14),
+    .gap = 6,
+
+    .background = gui.shade(0xffffff, 12),
+    .radius = theme.radius,
+
+}, &detail_parts);
+
+var problem = gui.label("", .{
+
+    .color = theme.danger,
+    .text_align = .center,
+
+});
+
+var setup_parts = [_]*gui.Node{ &heading, &disks, &summary, &problem, &installer };
 
 /// Shown instead of account setup when started from installation media.
-var setup = gui.box(theme.panel, &setup_parts);
+var setup = gui.box(theme.panel.with(.{
+
+    .padding = gui.Edges.all(24),
+    .gap = 14,
+
+}), &setup_parts);
 
 var form_parts = [_]*gui.Node{ &greeting, &name, &users, &password, &hint, &setup };
 
@@ -272,9 +319,25 @@ pub export fn app_main(_: usize, _: usize, environment: *const api.abi.Environme
 
     for (&disk_rows, 0..) |*row, index| {
 
-        row.* = gui.label("", theme.item.with(.{
+        disk_names[index] = gui.label("", .{
 
-            .height = 40,
+        });
+
+        disk_states[index] = gui.label("", theme.caption);
+        disk_parts[index] = .{ &disk_names[index], &disk_states[index] };
+
+        row.* = gui.box(theme.item.with(.{
+
+            .height = 60,
+            .padding = gui.Edges.axes(0, 14),
+            .direction = .column,
+            .gap = 3,
+            .justify = .center,
+            .items = .stretch,
+
+            .border = gui.shade(0xffffff, 16),
+            .border_width = theme.border,
+
             .hover = gui.Paint{
 
                 .background = gui.shade(0xffffff, 20),
@@ -283,10 +346,11 @@ pub export fn app_main(_: usize, _: usize, environment: *const api.abi.Environme
             .selected = gui.Paint{
 
                 .background = gui.shade(0xffffff, 34),
+                .border = theme.accent,
 
             },
 
-        }));
+        }), &disk_parts[index]);
 
         row.data = index;
         row.action = &pickDisk;
@@ -326,6 +390,7 @@ pub export fn app_main(_: usize, _: usize, environment: *const api.abi.Environme
 
         tick();
         desktop.tick();
+        if (installing) finish();
 
         if (gui.wait(all[0 .. surfaces.len + 1], desktop.patience(50))) |input| {
 
@@ -385,17 +450,8 @@ fn sync() void {
     greeting.hidden = state != .setup or bare;
     users.hidden = state == .setup;
     setup.hidden = state != .setup or !bare;
-    installer.hidden = drives == 0 or !installable(surveys[target]);
-    disks.hidden = installed;
-
-    for (&disk_rows, 0..) |*row, index| {
-
-        row.hidden = index >= drives;
-        row.selected = index == target;
-
-    }
-
-    if (bare and drives != 0) describe();
+    form.style.width = if (state == .setup and bare) wide else 320;
+    if (bare) describe();
 
     hint.content.label = switch (state) {
 
@@ -565,7 +621,9 @@ fn survey() void {
     while (drives < surveys.len) : (drives += 1) {
 
         surveys[drives] = .{};
-        const result = api.exchange(service, protocol.pack(.list, @intCast(drives)), std.mem.asBytes(&surveys[drives])) catch break;
+
+        // Checking a Windows volume for room reads its free-space map, which can outlast the usual second.
+        const result = api.exchangeWithin(service, protocol.pack(.list, @intCast(drives)), std.mem.asBytes(&surveys[drives]), 6000) catch break;
 
         if (result != 0) break;
 
@@ -586,6 +644,8 @@ fn survey() void {
 
 fn pickDisk(row: *gui.Node) void {
 
+    if (installing or installed) return;
+
     target = row.data;
     armed = false;
     notice = "";
@@ -599,70 +659,215 @@ fn installable(found: protocol.Survey) bool {
 
 }
 
-/// Labels each disk with its size and what it holds, and the button with what pressing it does.
+/// Fills the setup panel: each disk with its size and state, what installing on the picked one does, and the button.
 fn describe() void {
 
-    for (surveys[0..drives], 0..) |found, index| {
+    const listing = drives != 0 and !installing and !installed;
 
-        const what = switch (found.placement) {
+    disks.hidden = !listing;
 
-            .unreadable => "unreadable",
-            .empty => "empty",
-            .granite => "GraniteOS",
-            .beside, .full => if (found.windows) "Windows" else "in use",
+    for (&disk_rows, 0..) |*row, index| {
 
-        };
+        row.hidden = index >= drives;
+        row.selected = index == target;
+        if (index >= drives) continue;
 
-        disk_rows[index].content.label = std.fmt.bufPrint(&disk_labels[index], "Disk {d} · {d} GB · {s}", .{ index, found.sectors / 1953125, what }) catch "";
+        const found = surveys[index];
+        const gigabytes = found.sectors / 1953125;
+        const title = if (gigabytes < 1000) std.fmt.bufPrint(&disk_titles[index], "Disk {d}  ·  {d} GB", .{ index, gigabytes }) else std.fmt.bufPrint(&disk_titles[index], "Disk {d}  ·  {d}.{d} TB", .{ index, gigabytes / 1000, gigabytes % 1000 / 100 });
+
+        disk_names[index].content.label = title catch "";
+        disk_states[index].content.label = standing(found);
 
     }
 
-    // The button says how the last press went: installed, failed, or what the next press does.
-    installer.content.label = if (notice.len != 0) notice else if (armed) std.fmt.bufPrint(&button_label, "Erase disk {d} and install", .{target}) catch "" else "Install";
+    const lines: [2][]const u8 = if (installed) .{
+
+        "Installed.",
+        "Remove the USB stick and restart.",
+
+    } else if (installing) .{
+
+        "Installing...",
+        "",
+
+    } else if (drives == 0) .{
+
+        "No disks found.",
+        "",
+
+    } else explain(surveys[target]);
+
+    for (&details, lines) |*line, text| {
+
+        line.content.label = text;
+        line.hidden = text.len == 0;
+
+    }
+
+    problem.content.label = notice;
+    problem.hidden = notice.len == 0;
+
+    installer.hidden = !listing or !installable(surveys[target]);
+    if (installer.hidden) return;
+
+    const found = surveys[target];
+
+    installer.style = (if (armed) theme.destructive else theme.primary).with(.{
+
+        .height = 40,
+
+    });
+
+    installer.content.label = if (!armed) (if (found.existing) "Install again" else "Install") else if (found.shrink) "Shrink Windows and install" else std.fmt.bufPrint(&button_label, "Erase disk {d} and install", .{target}) catch "";
 
 }
 
-/// Installs on the picked disk: in its free space beside another system, or, asked twice, erasing a disk nothing else uses.
+/// A disk's state in a word or two, under its name in the list.
+fn standing(found: protocol.Survey) []const u8 {
+
+    return switch (found.placement) {
+
+        .unreadable => "Unreadable",
+        .empty => "Empty",
+        .granite => "GraniteOS",
+        .beside => if (found.existing) "GraniteOS installed" else if (found.shrink) "Windows" else "Free space",
+        .full => switch (found.obstacle) {
+
+            .none => "Full",
+            .used => "Windows  ·  end in use",
+            .hibernated => "Windows  ·  Fast Startup on",
+            .dirty => "Windows  ·  needs chkdsk",
+            .encrypted => "Windows  ·  BitLocker on",
+            .boot => "EFI partition full",
+
+        },
+
+    };
+
+}
+
+/// What installing on a disk does, or why it cannot and the fix.
+fn explain(found: protocol.Survey) [2][]const u8 {
+
+    return switch (found.placement) {
+
+        .unreadable => .{ "Can't read this disk.", "" },
+        .empty => .{ "Erases this disk. Uses 25 GB.", "" },
+        .granite => .{ "Erases GraniteOS on this disk.", "" },
+        .beside => if (found.existing) .{
+
+            "Updates GraniteOS. Files are kept.",
+            "",
+
+        } else if (found.shrink) .{
+
+            "Takes 25 GB of free space from Windows.",
+            "",
+
+        } else .{
+
+            std.fmt.bufPrint(&detail_bytes, "Uses {d} GB of free space.", .{@min(found.free, protocol.share) / 1953125}) catch "",
+            "",
+
+        },
+        .full => switch (found.obstacle) {
+
+            .none => .{ "No room.", "Free 25 GB in Windows first." },
+            .used => .{ "End of the Windows volume is in use.", "Shrink it by 25 GB in Windows." },
+            .hibernated => .{ "Windows is hibernated.", "Turn off Fast Startup, then shut down." },
+            .dirty => .{ "Windows needs a disk check.", "Run chkdsk C: /f in Windows." },
+            .encrypted => .{ "BitLocker is on.", "Turn it off in Windows." },
+            .boot => .{ "EFI partition is full.", "Needs about 20 MB free." },
+
+        },
+
+    };
+
+}
+
+/// Starts installing on the picked disk; erasing a disk or shrinking Windows first asks for a second press.
 fn install(_: *gui.Node) void {
 
     defer sync();
 
-    if (drives == 0 or installed) return;
+    if (drives == 0 or installed or installing or !installable(surveys[target])) return;
 
     const found = surveys[target];
-    const erase = found.placement == .empty or found.placement == .granite;
 
-    if (erase and !armed) {
+    notice = "";
+
+    if ((found.placement == .empty or found.placement == .granite or found.shrink) and !armed) {
 
         armed = true;
         return;
 
     }
 
+    armed = false;
+    installing = true;
+
+}
+
+/// Runs the install `install` started, once the screen says it has begun.
+fn finish() void {
+
+    installing = false;
+
+    defer sync();
+
+    const found = surveys[target];
+    const mode: protocol.Mode = if (found.placement == .empty or found.placement == .granite) .erase else .beside;
+
     const service = api.lookup(0, .install) catch {
 
-        notice = "Install failed";
+        notice = "Installer not running.";
         return;
 
     };
 
-    const mode: protocol.Mode = if (erase) .erase else .beside;
-    const result = (api.checked(api.raw(.call, service, protocol.pack(.install, @as(u56, @intCast(target)) | @as(u56, @intFromEnum(mode)) << 8), 6000)) catch {
+    const value = @as(u56, @intCast(target)) | @as(u56, @intFromEnum(mode)) << 8;
+    const result = (api.checked(api.raw(.call, service, protocol.pack(.install, value), 6000)) catch {
 
-        notice = "Install failed";
+        // A slow disk can outlast the wait; the installer answers a second question only once the install has ended.
+        installed = landed(service);
+        if (!installed) notice = "Install failed.";
+
         return;
 
     }).first;
 
+    installed = result < protocol.offline;
+    if (installed) return;
+
     notice = switch (result) {
 
-        protocol.missing => "No room on this disk",
-        protocol.denied, protocol.busy, protocol.empty, protocol.invalid => "Install failed",
-        else => "Installed: remove USB and restart",
+        protocol.missing => "No room.",
+        protocol.full => "EFI partition full.",
+        protocol.busy => "Disk in use; not erased.",
+        protocol.denied => "Administrators only.",
+        protocol.empty => "Loader missing from media.",
+        else => "Install failed.",
 
     };
 
-    installed = result < protocol.denied;
+    _ = landed(service);
+
+}
+
+/// Surveys the picked disk again, returning whether it now holds GraniteOS.
+fn landed(service: u64) bool {
+
+    var found = protocol.Survey{
+
+    };
+
+    const result = api.exchangeWithin(service, protocol.pack(.list, @intCast(target)), std.mem.asBytes(&found), 6000) catch return false;
+    if (result != 0) return false;
+
+    surveys[target] = found;
+
+    return found.placement == .granite or found.existing;
 
 }
 
